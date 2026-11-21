@@ -37,6 +37,7 @@ VERIFY_TURN_SOURCES = frozenset({"verify", "dev_test"})
 
 from ..clock import Clock
 from ..config import Config
+from ..launcher import LaunchPlan, parse_launch_request
 from ..memory.extraction import MemoryExtractor
 from ..memory.retrieval import MemoryRetriever
 from ..memory.store import FactStore
@@ -112,6 +113,7 @@ class ConversationManager:
         tools: ToolRegistry,
         evolution: PersonaEvolution | None = None,
         compute_guard=None,
+        launcher=None,
     ) -> None:
         self.db = db
         self.clock = clock
@@ -139,6 +141,10 @@ class ConversationManager:
         self._lock = asyncio.Lock()
         self._subscribers: list[asyncio.Queue] = []
         self._proactive_cb = None
+        # Optional launch service (aurora/launcher.py): the owner-configured
+        # application/website catalog for the deterministic "open X" path.
+        # None = feature absent (tools are not registered either).
+        self.launcher = launcher
         self._voice = None  # set by the app when voice is enabled
         self._streaming = False
         self.last_timing: dict[str, Any] = {}
@@ -397,6 +403,13 @@ class ConversationManager:
             result = await self._finish_system_reply(nl, person, source="reminder_set")
             return self._seal_verify_turn(result, user_msg_id, turn_source)
 
+        # deterministic "open X" / "launch X" — model-free, so launching works
+        # reliably with models that cannot do native tool calling
+        launch_reply = self._try_launch_request(text)
+        if launch_reply is not None:
+            result = await self._finish_system_reply(launch_reply, person, source="launch")
+            return self._seal_verify_turn(result, user_msg_id, turn_source)
+
         # explicit "remember this" → immediate durable fact (never from verify)
         m = REMEMBER_RE.search(text)
         if m and self.config.get("memory.enabled", True) and not verify:
@@ -452,6 +465,67 @@ class ConversationManager:
             result["archived"] = 1
             result["archive_reason"] = f"auto:{turn_source}"
         return result
+
+    def _try_launch_request(self, text: str) -> str | None:
+        """Deterministic application/website launches ("open firefox", "open
+        the Saturday Multiverse website", "what applications can you open?").
+        Returns the reply, or None when the text is not a plainly parseable
+        launch request (the model still gets its turn). Never needs the
+        model — the action must execute reliably; only catalog entries are
+        ever launched, and the destination is always the machine running
+        Aurora (requests aimed at the user's own machine are refused)."""
+        if self.launcher is None:
+            return None
+        plan = parse_launch_request(text)
+        if plan is None:
+            return None
+        launcher = self.launcher
+        if plan.kind == "list":
+            return launcher.list_reply()
+        if plan.kind == "ask_url":
+            return "Sure — which address should I open? Paste the link or name a site from my list."
+        if plan.kind == "remote":
+            return launcher.remote_reply()
+        if not launcher.enabled:
+            return ("Application and website launching is disabled in settings "
+                    "(launcher.enabled).")
+        if plan.kind in ("website", "application"):
+            kind = plan.kind
+            hit, options = launcher.match(kind, plan.target)
+            if options:
+                return launcher.ambiguous_reply(kind, options)
+            if hit is None:
+                if len(plan.target.split()) <= 2:
+                    label = ("website" if kind == "website" else "application")
+                    return (f"\"{plan.target}\" is not in my {label} catalog — add it "
+                            "under `launcher:` in config.yaml, or ask me what I can open.")
+                return None  # longer candidates are conversation → model turn
+            if kind == "website":
+                return launcher.open_website(hit).message
+            return launcher.launch_application(hit).message
+        if plan.kind == "unknown":
+            hit, options = launcher.match("application", plan.target)
+            if options:
+                return launcher.ambiguous_reply("application", options)
+            if hit is not None:
+                res = launcher.launch_application(hit)
+                return res.message
+            site_hit, site_opts = launcher.match("website", plan.target)
+            if site_opts:
+                return launcher.ambiguous_reply("website", site_opts)
+            if site_hit is not None:
+                res = launcher.open_website(site_hit)
+                return res.message
+            # no catalog match at all: only answer for short plain names
+            # ("open firefox"). Longer candidates ("open the pod bay doors",
+            # "open up about your feelings") are conversation — the model
+            # gets its normal turn.
+            if len(plan.target.split()) <= 2:
+                return (f"I don't have \"{plan.target}\" in my launch catalog — I only "
+                        "open applications and websites the owner configured. "
+                        "Ask me what I can open to see the list.")
+            return None
+        return None
 
     def _handle_command(self, text: str) -> str:
         """Slash commands: deterministic, model-free management of reminders
@@ -666,6 +740,9 @@ class ConversationManager:
                 "user_text": user_request,
                 "allow_schedule": allow_schedule,
                 "on_change": (lambda: None),
+                # Resolved per call so a replaced launcher (tests, config
+                # reload) is the one that actually runs.
+                "launcher": self.launcher,
             }
 
         try:
@@ -829,11 +906,14 @@ class ConversationManager:
             return False
         if re.search(r'"name"\s*:\s*"(set_reminder|cancel_reminder|snooze_reminder|'
                      r'list_reminders|recall_facts|remember_fact|forget_fact|'
-                     r'update_fact|get_time)"', raw):
+                     r'update_fact|get_time|open_website|launch_application|'
+                     r'list_available_applications)"', raw):
             return True
         if '"parameters"' in raw or '"arguments"' in raw:
             if any(k in raw for k in ("set_reminder", "recall_facts", "remember_fact",
-                                      "list_reminders", "get_time", "cancel_reminder")):
+                                      "list_reminders", "get_time", "cancel_reminder",
+                                      "open_website", "launch_application",
+                                      "list_available_applications")):
                 return True
         return False
 

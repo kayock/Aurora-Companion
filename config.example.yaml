@@ -82,6 +82,24 @@ resources:
   model_health_ttl_seconds: 60
   foreground_grace_seconds: 120
 
+# Application and website launching ("open firefox", "open github", "what
+# applications can you open?"). Aurora only ever launches entries from this
+# catalog, on the machine running Aurora. Add your own (e.g. the Saturday
+# Multiverse site) — names are matched leniently: "saturday multiverse".
+launcher:
+  enabled: false   # set true only after reviewing the catalog
+  applications:
+    firefox: {command: [firefox], description: Firefox web browser}
+    cursor: {command: [cursor], description: Cursor code editor}
+    files: {command: [nautilus], description: File manager}
+    terminal: {command: [gnome-terminal], description: Terminal}
+    calculator: {command: [gnome-calculator], description: Calculator}
+  websites:
+    github: https://github.com
+    google: https://www.google.com
+    wikipedia: https://www.wikipedia.org
+    # saturday multiverse: https://<your-site-here>
+
 # LAN auth: when set, every /api/* call needs this token. Generate:
 #   openssl rand -hex 32
 server:

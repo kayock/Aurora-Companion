@@ -3,6 +3,55 @@
 All notable changes to Aurora Companion. The project follows semver-ish versioning
 (see docs/GITHUB_RELEASE.md §6). Dates are UTC.
 
+## [1.0.7] — 2026-11-21
+
+### Changed
+- **Launcher stays off until opted in.** `launcher.enabled` defaults to false
+  so a deploy does not start opening programs on Portable. Set
+  `launcher.enabled: true` in config.yaml after reviewing the catalog.
+
+### Added
+- **Application & website launching** (`aurora/launcher.py`, wired through the
+  conversation manager and the tool registry): "Open Firefox", "Launch
+  Cursor", "Open GitHub", "Open the Saturday Multiverse website", "Open this
+  web address: …", "What applications can you open?". Deterministic model-free
+  parsing handles plain requests reliably (works with models that cannot do
+  native tool calling); three new tools (`open_website`, `launch_application`,
+  `list_available_applications`) serve tool-capable models. Only owner-
+  configured catalog entries run (argv `Popen`, no shell); only http(s) URLs
+  open; explicit current-utterance intent is required; requests aimed at the
+  dashboard's computer are refused honestly (Aurora acts on her own machine
+  only — remote launching is documented, not implemented). Catalog + availability
+  exposed read-only at `GET /api/launcher`. 35 new tests
+  (`tests/test_launcher.py`).
+- **Aurora Intelligence Lab** (`aurora/evaluation/` + `scripts/run_intelligence_lab.py`,
+  `docs/INTELLIGENCE_LAB.md`): a repeatable, fair benchmark for local models
+  (targets: llama3.2:3b, phi4-mini:latest, deepseek-q8:latest) across 31
+  multi-turn scenarios in 7 weighted categories (conversational, reasoning,
+  memory, personality, tool use, context reliability, recovery). Fairness
+  rules fix the previous evaluation's flaws: empty visible answers can never
+  pass (they score 0 and count against the visible completion rate); thinking
+  channels (`message.thinking`, `reasoning_content`, inline `<think>`) are
+  recorded separately and never re-fed as answers; endpoint failures are
+  IntegrationErrors excluded from scoring; identical prompts/settings for all
+  models; repeated trials; each server's effective context is read from its
+  API and never modified (scenarios that don't fit are skipped honestly).
+  Ollama + OpenAI-compatible + mock backends; rubric scoring with objective
+  checks; markdown + JSON reports. The harness is DB-free by construction —
+  it cannot touch production history, memories, persona or model selection.
+  23 new tests (`tests/test_evaluation.py`).
+
+### Fixed
+- Launch-request parsing gap: "Aurora open firefox" (no comma after the name)
+  now takes the deterministic path.
+- Evaluation loop correctness during development: scripted tool results are
+  appended as proper `role=tool` messages before the follow-up completion
+  (covered by tests).
+
+### Test totals
+- Full suite: **405 passed** (baseline c07de322: 347 passed; +35 launcher,
+  +23 evaluation). No existing test regressed.
+
 ## [1.0.6] — 2026-11-21
 
 ### Fixed

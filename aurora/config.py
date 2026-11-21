@@ -131,6 +131,31 @@ DEFAULTS: dict[str, Any] = {
         "model_health_ttl_seconds": 60,
         "foreground_grace_seconds": 120,
     },
+    "launcher": {
+        # Application/website launching ("open firefox", "open github").
+        # Off until the owner sets launcher.enabled in config.yaml. Only
+        # catalog entries are ever launched; requests aimed at the
+        # dashboard's computer are refused (Aurora acts on her own machine).
+        "enabled": False,
+        "applications": {
+            "firefox": {"command": ["firefox"], "description": "Firefox web browser"},
+            "chromium": {"command": ["chromium"], "description": "Chromium browser"},
+            "cursor": {"command": ["cursor"], "description": "Cursor code editor"},
+            "code": {"command": ["code"], "description": "VS Code"},
+            "files": {"command": ["nautilus"], "description": "File manager"},
+            "terminal": {"command": ["gnome-terminal"], "description": "Terminal"},
+            "calculator": {"command": ["gnome-calculator"], "description": "Calculator"},
+            "text editor": {"command": ["gnome-text-editor"], "description": "Text editor"},
+            "settings": {"command": ["gnome-control-center"], "description": "System settings"},
+            "system monitor": {"command": ["gnome-system-monitor"], "description": "System monitor"},
+        },
+        "websites": {
+            "github": "https://github.com",
+            "google": "https://www.google.com",
+            "wikipedia": "https://www.wikipedia.org",
+            "youtube": "https://www.youtube.com",
+        },
+    },
     "server": {
         # When set, every /api/* call needs 'Authorization: Bearer <token>',
         # an 'X-Aurora-Token' header, or (SSE only) '?token=...'. The static

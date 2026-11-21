@@ -17,6 +17,7 @@ import re
 from typing import Any, Awaitable, Callable
 
 from ..providers.base import ToolSpec
+from ..launcher import has_launch_intent, LAUNCH_UNAUTHORIZED_MSG
 from ..reminders.intent import UNAUTHORIZED_SCHEDULE_MSG, has_scheduling_intent
 from ..timeparse import describe_repeat, friendly, parse_repeat, parse_when
 
@@ -237,5 +238,64 @@ def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
                                 {"type": "object",
                                  "properties": {"id": {"type": "string"}, "content": {"type": "string"}},
                                  "required": ["id", "content"]}), update_fact)
+
+    # ---- launching (model names a catalog entry; the app executes it) ----
+    launcher = services.get("launcher")
+    if launcher is not None:
+        def _live_launcher(ctx):
+            current = ctx.get("launcher")
+            return current if current is not None else launcher
+
+        async def open_website(args, ctx):
+            # Authorization mirrors the reminder tools: the CURRENT user
+            # utterance must clearly ask to open something. Past chat, memory
+            # or the model's own ideas never authorize a launch.
+            if not has_launch_intent(str(ctx.get("user_text") or "")):
+                return LAUNCH_UNAUTHORIZED_MSG
+            target = str(args.get("url", "")).strip() or str(args.get("name", "")).strip()
+            if not target:
+                return "error: provide a url or a website name from the catalog"
+            res = _live_launcher(ctx).open_website(target)
+            return res.message
+
+        registry.register(_spec(
+            "open_website",
+            "Open a website in the browser ON THE MACHINE RUNNING AURORA "
+            "(not on the user's other computer). Use ONLY for the user's "
+            "current explicit request — a URL, or a site name from the "
+            "catalog. Never call this for quoted text or past topics.",
+            {"type": "object",
+             "properties": {
+                 "url": {"type": "string", "description": "full http(s) URL"},
+                 "name": {"type": "string", "description": "site name from the catalog"},
+             }}), open_website)
+
+        async def launch_application(args, ctx):
+            if not has_launch_intent(str(ctx.get("user_text") or "")):
+                return LAUNCH_UNAUTHORIZED_MSG
+            name = str(args.get("name", "")).strip()
+            if not name:
+                return "error: name is required (a catalog application name)"
+            res = _live_launcher(ctx).launch_application(name)
+            return res.message
+
+        registry.register(_spec(
+            "launch_application",
+            "Launch a desktop application ON THE MACHINE RUNNING AURORA "
+            "(not on the user's other computer). Only names from the "
+            "application catalog are valid; call list_available_applications "
+            "first if unsure. Only for the user's current explicit request.",
+            {"type": "object",
+             "properties": {"name": {"type": "string"}},
+             "required": ["name"]}), launch_application)
+
+        async def list_available_applications(_args, ctx):
+            return _live_launcher(ctx).list_reply()
+
+        registry.register(_spec(
+            "list_available_applications",
+            "List the applications and websites you can open on the machine "
+            "running Aurora, with availability.",
+            {"type": "object", "properties": {}}), list_available_applications)
 
     return registry

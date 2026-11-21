@@ -131,6 +131,18 @@ def create_server(app: CompanionApp) -> FastAPI:
                 app.db.execute("DELETE FROM messages WHERE id >= ?", (keep_min,))
         return {"ok": True}
 
+    # ------------------------------------------------------------ launcher
+    @api.get("/api/launcher")
+    async def launcher_catalog():
+        """What Aurora can open on her own machine (owner-configured catalog;
+        read-only). Launching itself happens through chat, deterministically."""
+        l = app.launcher
+        if l is None:
+            return {"enabled": False, "applications": [], "websites": []}
+        return {"enabled": bool(l.enabled),
+                "applications": l.available_applications(),
+                "websites": sorted(l.websites)}
+
     # ------------------------------------------------------------ memory
     @api.get("/api/memory/facts")
     async def facts(view: str = "active", q: str = "", subject: str | None = None):

@@ -25,6 +25,7 @@ from .clock import Clock
 from .config import Config
 from .conversation.manager import ConversationManager
 from .conversation.tools import default_tool_registry
+from .launcher import Launcher
 from .memory.changelog import MemoryChangelog
 from .memory.consolidation import Consolidator
 from .memory.extraction import MemoryExtractor
@@ -161,16 +162,20 @@ class CompanionApp:
             compute_guard=self.guard,
         )
 
+        # launching (owner-configured catalog; deterministic "open X" path)
+        self.launcher = Launcher(config.get("launcher", {}))
+
         # conversation
         self.tools = default_tool_registry({
             "reminders": self.reminders, "clock": self.clock, "memory": self.store,
-            "config": config,
+            "config": config, "launcher": self.launcher,
         })
         self.conversation = ConversationManager(
             self.db, self.clock, config, self.persona, self.mood, self.retriever,
             self.store, self.reminders, self.people,
             self.chat_provider, self.background_provider, self.tools,
             evolution=self.evolution, compute_guard=self.guard,
+            launcher=self.launcher,
         )
         self.reminder_scheduler.on_due = self.conversation.deliver_reminder
 
