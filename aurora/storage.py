@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -38,11 +38,16 @@ CREATE TABLE IF NOT EXISTS messages (
     ts       REAL NOT NULL,
     person   TEXT NOT NULL DEFAULT 'owner',
     sender   TEXT NOT NULL DEFAULT '',  -- display name for user turns
-    source   TEXT NOT NULL DEFAULT 'user',
-    meta     TEXT NOT NULL DEFAULT '{}'
+    source   TEXT NOT NULL DEFAULT 'user',  -- user | verify | chat | proactive | …
+    meta     TEXT NOT NULL DEFAULT '{}',
+    archived INTEGER NOT NULL DEFAULT 0,   -- soft-hide from active context
+    archive_reason TEXT,
+    archived_at REAL
 );
 CREATE INDEX IF NOT EXISTS messages_ts ON messages (ts);
 CREATE INDEX IF NOT EXISTS messages_person ON messages (person);
+-- messages_active (archived, id) is created in _migrate after the
+-- soft-archive columns exist on upgraded databases.
 
 -- Long-term facts (the single memory system).
 CREATE TABLE IF NOT EXISTS facts (
@@ -221,8 +226,17 @@ class Database:
         so re-running is a no-op and existing rows keep their data — user
         memory and settings are never rewritten here.
         """
-        wanted = {"reminders": {"kind": "TEXT NOT NULL DEFAULT ''",
-                                "duration": "INTEGER"}}
+        wanted = {
+            "reminders": {
+                "kind": "TEXT NOT NULL DEFAULT ''",
+                "duration": "INTEGER",
+            },
+            "messages": {
+                "archived": "INTEGER NOT NULL DEFAULT 0",
+                "archive_reason": "TEXT",
+                "archived_at": "REAL",
+            },
+        }
         with self._lock:
             for table, columns in wanted.items():
                 existing = {r["name"] for r in
@@ -232,6 +246,13 @@ class Database:
                 for name, decl in columns.items():
                     if name not in existing:
                         self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            # Active-message index (idempotent).
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS messages_active ON messages (archived, id)"
+            )
+            version = self.get_meta("schema_version")
+            if version is None or int(version) < SCHEMA_VERSION:
+                self.set_meta("schema_version", str(SCHEMA_VERSION))
 
     # -- generic helpers -------------------------------------------------
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:

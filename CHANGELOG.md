@@ -3,6 +3,24 @@
 All notable changes to Aurora Companion. The project follows semver-ish versioning
 (see docs/GITHUB_RELEASE.md §6). Dates are UTC.
 
+## [1.0.5] — 2026-11-21
+
+### Fixed
+- **Conversation contamination:** messages can be soft-archived (`archived` /
+  `archive_reason` / `archived_at`) and are excluded from the model window,
+  rolling summaries, dashboard history (unless `include_archived=1`), search,
+  memory extraction, consolidation, and lesson scanning. Confirmed development
+  and verification chatter can be removed from living context without deleting
+  the rows (recoverable from the DB / backups).
+- **Verification harness isolation:** set `AURORA_TURN_SOURCE=verify` (or
+  `dev_test`) so live checks tag and auto-archive those turns, never write
+  durable “remember that …” facts, and mark any NL reminders with
+  `source=verify`. Pytest already refuses `/var/lib/aurora`.
+
+### Notes
+- Schema version 2 (additive). Owner personality seed and legitimate memories
+  are not reset by this release.
+
 ## [1.0.4] — 2026-11-21
 
 ### Fixed

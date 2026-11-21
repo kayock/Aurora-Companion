@@ -25,9 +25,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time as _time
 from typing import Any
+
+# User-turn provenance for development / live verification harnesses.
+# Messages tagged this way stay in the DB for audit but are excluded from
+# model context, rolling summaries, and memory extraction.
+VERIFY_TURN_SOURCES = frozenset({"verify", "dev_test"})
 
 from ..clock import Clock
 from ..config import Config
@@ -163,39 +169,96 @@ class ConversationManager:
                 pass
 
     # ------------------------------------------------------------------ history
-    def history(self, limit: int = 50, before_id: int | None = None) -> list[dict]:
-        sql = "SELECT * FROM messages"
+    @staticmethod
+    def _turn_source_from_env() -> str:
+        """Optional provenance for verification harnesses (AURORA_TURN_SOURCE)."""
+        raw = (os.environ.get("AURORA_TURN_SOURCE") or "").strip().lower()
+        if raw in VERIFY_TURN_SOURCES:
+            return raw
+        return "user"
+
+    def history(self, limit: int = 50, before_id: int | None = None,
+                include_archived: bool = False) -> list[dict]:
+        clauses: list[str] = []
         params: list[Any] = []
+        if not include_archived:
+            clauses.append("COALESCE(archived, 0) = 0")
         if before_id is not None:
-            sql += " WHERE id < ?"
+            clauses.append("id < ?")
             params.append(before_id)
+        sql = "SELECT * FROM messages"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
         rows = self.db.query(sql, tuple(params))
         return [self._msg_dict(r) for r in reversed(rows)]
 
+    def archive_messages(self, ids: list[int], reason: str) -> int:
+        """Soft-hide confirmed records from active context (recoverable)."""
+        if not ids:
+            return 0
+        now = self.clock.now()
+        reason = (reason or "archived").strip()[:200]
+        n = 0
+        for mid in ids:
+            cur = self.db.execute(
+                "UPDATE messages SET archived=1, archive_reason=?, archived_at=? "
+                "WHERE id=? AND COALESCE(archived,0)=0",
+                (reason, now, int(mid)),
+            )
+            n += cur.rowcount
+        return n
+
     def _msg_dict(self, row) -> dict:
+        keys = row.keys() if hasattr(row, "keys") else []
+        archived = int(row["archived"]) if "archived" in keys else 0
         return {
             "id": row["id"], "role": row["role"], "content": row["content"],
             "ts": row["ts"], "person": row["person"], "sender": row["sender"],
             "source": row["source"], "meta": json.loads(row["meta"] or "{}"),
+            "archived": archived,
+            "archive_reason": row["archive_reason"] if "archive_reason" in keys else None,
         }
+
+    def _context_eligible(self, row) -> bool:
+        keys = row.keys() if hasattr(row, "keys") else []
+        if "archived" in keys and int(row["archived"] or 0):
+            return False
+        source = (row["source"] or "") if "source" in keys else ""
+        if source in VERIFY_TURN_SOURCES:
+            return False
+        meta_raw = row["meta"] if "meta" in keys else "{}"
+        try:
+            meta = json.loads(meta_raw or "{}")
+        except ValueError:
+            meta = {}
+        if isinstance(meta, dict) and meta.get("verification"):
+            return False
+        return True
 
     def _window(self) -> list[dict]:
         limit = int(self.config.get("conversation.max_history_turns", 24))
+        # Over-fetch so soft-archived / verify rows do not shrink the window.
         rows = self.db.query(
-            "SELECT * FROM messages ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM messages WHERE COALESCE(archived,0)=0 "
+            "ORDER BY id DESC LIMIT ?",
+            (max(limit * 4, limit),),
         )
-        out = []
-        for r in reversed(rows):
+        out: list[dict] = []
+        for r in rows:  # newest first
             if r["role"] not in ("user", "assistant"):
+                continue
+            if not self._context_eligible(r):
                 continue
             # Never re-feed leaked tool-call JSON into the model context —
             # that is the main source of topic stickiness after a bad turn.
             if r["role"] == "assistant" and self._looks_like_tool_json(r["content"]):
                 continue
             out.append({"role": r["role"], "content": r["content"], "id": r["id"]})
-        return out
+            if len(out) >= limit:
+                break
+        return list(reversed(out))
 
     def _summary_block(self) -> str:
         summary = self.db.get_meta("conversation.summary")
@@ -210,18 +273,21 @@ class ConversationManager:
         maybe_summarize / Shikigami's rolling summary, simplified)."""
         trigger = int(self.config.get("conversation.summary_trigger_messages", 60))
         total = self.db.query_one(
-            "SELECT COUNT(*) AS n, MIN(id) AS first_id, MAX(id) AS last_id FROM messages"
+            "SELECT COUNT(*) AS n, MIN(id) AS first_id, MAX(id) AS last_id FROM messages "
+            "WHERE COALESCE(archived,0)=0"
         )
-        if total is None or total["n"] < trigger:
+        if total is None or total["n"] < trigger or total["last_id"] is None:
             return
         keep = int(self.config.get("conversation.max_history_turns", 24))
         summarized_until = int(self.db.get_meta("conversation.summary_until_id") or 0)
         window_start = total["last_id"] - keep
         pending_end = max(window_start, summarized_until)
         rows = self.db.query(
-            "SELECT * FROM messages WHERE id <= ? AND id > ? ORDER BY id ASC",
+            "SELECT * FROM messages WHERE id <= ? AND id > ? AND COALESCE(archived,0)=0 "
+            "ORDER BY id ASC",
             (pending_end, summarized_until),
         )
+        rows = [r for r in rows if self._context_eligible(r)]
         if len(rows) < 8 or self.background_provider is None:
             return
         convo = "\n".join(f"{r['role']}: {r['content'][:400]}" for r in rows)
@@ -257,9 +323,10 @@ class ConversationManager:
         self.db.set_meta_json("stats", stats)
 
         sender = sender_name or self.people.display_name(person)
+        turn_source = self._turn_source_from_env()
         cur = self.db.execute(
             "INSERT INTO messages (role, content, ts, person, sender, source) VALUES (?,?,?,?,?,?)",
-            ("user", text, now, person, sender, "user"),
+            ("user", text, now, person, sender, turn_source),
         )
         user_msg_id = cur.lastrowid
 
@@ -268,30 +335,37 @@ class ConversationManager:
             self._proactive_cb()
         await self._emit({"type": "message", "message": {
             "id": user_msg_id, "role": "user", "content": text, "ts": now,
-            "person": person, "sender": sender, "source": "user", "meta": {}}})
+            "person": person, "sender": sender, "source": turn_source, "meta": {}}})
+
+        verify = turn_source in VERIFY_TURN_SOURCES
 
         if text.startswith("/"):
             reply = self._handle_command(text)
-            return await self._finish_system_reply(reply, person, source="chat")
+            result = await self._finish_system_reply(reply, person, source="chat")
+            return self._seal_verify_turn(result, user_msg_id, turn_source)
 
         # timer follow-up answers ("repeat", "five more minutes", "dismiss")
         # are matched first — they only count while a decision is pending
         decision = await self._try_timer_decision(text)
         if decision is not None:
-            return await self._finish_system_reply(decision, person, source="timer")
+            result = await self._finish_system_reply(decision, person, source="timer")
+            return self._seal_verify_turn(result, user_msg_id, turn_source)
 
         # natural-language reminders/timers — deterministic, model-free, so
         # they execute reliably even with no model or a JSON-happy model
         try:
-            nl = await self._try_parse_reminder_request(text, person)
+            nl = await self._try_parse_reminder_request(
+                text, person, reminder_source=("verify" if verify else "user"),
+            )
         except ValueError:
             nl = None  # trivial text (e.g. "hi") — not a reminder; model's turn
         if nl is not None:
-            return await self._finish_system_reply(nl, person, source="reminder_set")
+            result = await self._finish_system_reply(nl, person, source="reminder_set")
+            return self._seal_verify_turn(result, user_msg_id, turn_source)
 
-        # explicit "remember this" → immediate durable fact
+        # explicit "remember this" → immediate durable fact (never from verify)
         m = REMEMBER_RE.search(text)
-        if m and self.config.get("memory.enabled", True):
+        if m and self.config.get("memory.enabled", True) and not verify:
             content = m.group(2).strip()
             try:
                 fact = self.store.add_fact(
@@ -302,6 +376,9 @@ class ConversationManager:
             except Exception as exc:
                 pre = f"(I couldn't store that memory: {exc})\n\n"
             text_for_model = text  # still answered naturally below
+        elif m and verify:
+            pre = "(Verification turn — durable memory not written.)\n\n"
+            text_for_model = text
         else:
             pre, text_for_model = "", text
 
@@ -318,8 +395,29 @@ class ConversationManager:
             degraded = {"degraded": "model_unreachable", "error": str(exc)[:200]}
         else:
             degraded = None
-        return await self._finish_assistant_reply(reply_text, person, user_msg_id,
-                                                  source="chat", meta=degraded)
+        if verify:
+            degraded = dict(degraded or {})
+            degraded["verification"] = True
+        result = await self._finish_assistant_reply(
+            reply_text, person, user_msg_id,
+            source=("verify" if verify else "chat"), meta=degraded,
+        )
+        return self._seal_verify_turn(result, user_msg_id, turn_source)
+
+    def _seal_verify_turn(self, result: dict, user_msg_id: int, turn_source: str) -> dict:
+        """Soft-archive a verification harness turn so it cannot enter living context."""
+        if turn_source not in VERIFY_TURN_SOURCES:
+            return result
+        ids = [user_msg_id]
+        rid = result.get("id") if isinstance(result, dict) else None
+        if rid:
+            ids.append(int(rid))
+        self.archive_messages(ids, f"auto:{turn_source}")
+        if isinstance(result, dict):
+            result = dict(result)
+            result["archived"] = 1
+            result["archive_reason"] = f"auto:{turn_source}"
+        return result
 
     def _handle_command(self, text: str) -> str:
         """Slash commands: deterministic, model-free management of reminders
@@ -801,7 +899,9 @@ class ConversationManager:
             "count": len(active) + len(self.pending_timers),
         }
 
-    async def _try_parse_reminder_request(self, text: str, person: str) -> str | None:
+    async def _try_parse_reminder_request(
+        self, text: str, person: str, reminder_source: str = "user",
+    ) -> str | None:
         """Deterministic NL reminders/timers ("remind me to X in 15 minutes",
         "set a timer for 5 minutes"). Returns a confirmation reply, or None
         when the text is not a plainly parseable request (the model still
@@ -832,7 +932,7 @@ class ConversationManager:
         if kind == "timer" and not tail:
             label = f"Timer ({when_text})"  # bare duration → generic label
         rem = self.reminders.add(label, due, repeat=repeat, person=person,
-                                 source="user", kind=kind,
+                                 source=reminder_source or "user", kind=kind,
                                  duration=int(round(due - now)) if kind == "timer" else None)
         rep = f", repeating {describe_repeat(repeat)}" if repeat else ""
         if kind == "timer":

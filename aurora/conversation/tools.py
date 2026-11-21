@@ -169,8 +169,14 @@ def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
     # ---- memory ----
     if facts is not None:
         async def remember_fact(args, ctx):
+            import os
             person = ctx.get("person", "owner")
             user_text = str(ctx.get("user_text") or "")
+            if (os.environ.get("AURORA_TURN_SOURCE") or "").strip().lower() in (
+                "verify", "dev_test",
+            ):
+                return ("error: verification turns do not write durable owner facts "
+                        "(set AURORA_TURN_SOURCE only for disposable harnesses)")
             # Do not let the model invent durable "user asked me to…" facts
             # from ordinary chat — require an explicit remember request.
             if not re.search(r"(?i)\b(remember|don'?t forget|keep in mind)\b", user_text):

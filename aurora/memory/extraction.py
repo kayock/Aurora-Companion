@@ -84,10 +84,14 @@ class MemoryExtractor:
 
     def _batch_messages(self, since_id: int, limit: int = 40) -> list[dict]:
         rows = self.db.query(
-            "SELECT id, role, content, ts FROM messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+            "SELECT id, role, content, ts FROM messages "
+            "WHERE id > ? AND COALESCE(archived,0)=0 "
+            "AND COALESCE(source,'') NOT IN ('verify','dev_test') "
+            "ORDER BY id ASC LIMIT ?",
             (since_id, limit),
         )
-        return [{"id": r["id"], "role": r["role"], "content": r["content"], "ts": r["ts"]} for r in rows]
+        return [{"id": r["id"], "role": r["role"], "content": r["content"], "ts": r["ts"]}
+                for r in rows]
 
     def _cursor(self) -> int:
         return int(self.db.get_meta("memory.extraction_cursor") or 0)

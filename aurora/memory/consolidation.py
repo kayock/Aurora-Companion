@@ -157,7 +157,10 @@ class Consolidator:
 
     def _pending_messages(self, since_ts: float, limit: int = 60) -> list:
         return self.db.query(
-            "SELECT id, role, content, ts FROM messages WHERE id > 0 AND ts > ? ORDER BY id ASC LIMIT ?",
+            "SELECT id, role, content, ts FROM messages "
+            "WHERE id > 0 AND ts > ? AND COALESCE(archived,0)=0 "
+            "AND COALESCE(source,'') NOT IN ('verify','dev_test') "
+            "ORDER BY id ASC LIMIT ?",
             (since_ts, limit),
         )
 
@@ -261,7 +264,10 @@ class Consolidator:
     async def _collect_lessons(self) -> int:
         since = float(self.db.get_meta("lessons.scan_cursor") or 0)
         rows = self.db.query(
-            "SELECT id, role, content FROM messages WHERE id > ? AND role='user' ORDER BY id ASC LIMIT 80",
+            "SELECT id, role, content FROM messages "
+            "WHERE id > ? AND role='user' AND COALESCE(archived,0)=0 "
+            "AND COALESCE(source,'') NOT IN ('verify','dev_test') "
+            "ORDER BY id ASC LIMIT 80",
             (since,),
         )
         if not rows:

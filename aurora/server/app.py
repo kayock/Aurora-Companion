@@ -98,15 +98,24 @@ def create_server(app: CompanionApp) -> FastAPI:
         return JSONResponse(msg)
 
     @api.get("/api/history")
-    async def history(limit: int = 60, before: int | None = None):
-        return {"messages": app.conversation.history(limit=limit, before_id=before)}
+    async def history(limit: int = 60, before: int | None = None,
+                      include_archived: bool = False):
+        return {"messages": app.conversation.history(
+            limit=limit, before_id=before, include_archived=include_archived,
+        )}
 
     @api.get("/api/search")
-    async def search(q: str):
-        rows = app.db.query(
-            "SELECT id, role, content, ts, person, source FROM messages "
-            "WHERE content LIKE ? ORDER BY id DESC LIMIT 50", (f"%{q}%",)
+    async def search(q: str, include_archived: bool = False):
+        sql = (
+            "SELECT id, role, content, ts, person, source, "
+            "COALESCE(archived,0) AS archived FROM messages "
+            "WHERE content LIKE ?"
         )
+        params: list = [f"%{q}%"]
+        if not include_archived:
+            sql += " AND COALESCE(archived,0)=0"
+        sql += " ORDER BY id DESC LIMIT 50"
+        rows = app.db.query(sql, tuple(params))
         return {"messages": [dict(r) for r in rows]}
 
     @api.delete("/api/history")
