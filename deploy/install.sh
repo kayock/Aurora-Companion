@@ -112,7 +112,7 @@ if [[ -f "$AURORA_ETC/config.yaml" ]]; then
 else
   sed -e "s|^port: 8795|port: $AURORA_PORT|" -e "s|^host: 0.0.0.0|host: $AURORA_HOST|" \
       -e "s|data_dir: /var/lib/aurora|data_dir: $AURORA_DATA|" \
-      -e "s|auth_token: \"CHANGE_ME_openssl_rand_hex_32\"|auth_token: \"$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64)\"|" \
+      -e "s|auth_token: \"CHANGE_ME_openssl_rand_hex_32\"|auth_token: \"\"|"  # empty = no LAN token (home network) \
       "$SRC/deploy/config.portable.yaml" > "$AURORA_ETC/config.yaml"
   echo "   wrote $AURORA_ETC/config.yaml (edit model base_url + model id!)"
 fi
@@ -257,7 +257,7 @@ EOF
 
 == done ==
   dashboard : $( [[ $WITH_TLS -eq 1 && -f "$AURORA_ETC/tls/aurora.crt" ]] && echo https || echo http)://$AURORA_HOST:$AURORA_PORT  (from the LAN: $( [[ $WITH_TLS -eq 1 && -f "$AURORA_ETC/tls/aurora.crt" ]] && echo https || echo http)://10.0.0.45:$AURORA_PORT)
-  auth token: server.auth_token in $AURORA_ETC/config.yaml (mode 600, owner $AURORA_USER)
+  auth token: disabled by default (server.auth_token empty); set only if you need LAN gating
   logs      : journalctl -u aurora-companion -f
   status    : $AURORA_HOME/venv/bin/python $AURORA_HOME/run.py --config $AURORA_ETC/config.yaml --check
   voice check: sudo $AURORA_HOME/deploy/verify-voice.sh

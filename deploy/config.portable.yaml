@@ -59,9 +59,9 @@ resources:
 
 # ---------------------------------------------------------------- access
 server:
-  # LAN browsers must present this token (Authorization: Bearer …).
-  # Generate: openssl rand -hex 32
-  auth_token: "CHANGE_ME_openssl_rand_hex_32"
+  # Optional LAN token. Empty = open on the home LAN (no browser prompt).
+  # To require a token: set a long random string (openssl rand -hex 32).
+  auth_token: ""
   # HTTPS for secure-context push-to-talk from other LAN machines (browsers
   # only grant microphone access on HTTPS or localhost). Generate the local
   # self-signed certificate with `sudo deploy/make-cert.sh` (or install with
