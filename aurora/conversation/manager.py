@@ -50,6 +50,14 @@ from ..reminders.scheduler import ReminderScheduler
 from ..reminders.store import Reminder, ReminderStore
 from ..storage import Database
 from ..timeparse import describe_repeat, friendly, parse_repeat, parse_when
+from .focus import (
+    close_loop_reply,
+    focus_instruction,
+    is_confirm_ask,
+    mentions_reminder_topic,
+    should_close_schedule_loop,
+    topic_change_away_from_schedule,
+)
 from .prompt import PromptBuilder
 from .tools import ToolRegistry
 
@@ -237,7 +245,7 @@ class ConversationManager:
             return False
         return True
 
-    def _window(self) -> list[dict]:
+    def _window(self, current_text: str | None = None) -> list[dict]:
         limit = int(self.config.get("conversation.max_history_turns", 24))
         # Over-fetch so soft-archived / verify rows do not shrink the window.
         rows = self.db.query(
@@ -245,6 +253,11 @@ class ConversationManager:
             "ORDER BY id DESC LIMIT ?",
             (max(limit * 4, limit),),
         )
+        drop_reminder_noise = bool(
+            current_text and current_text.strip()
+            and not mentions_reminder_topic(current_text)
+        )
+        skipped_reminder_rows = 0
         out: list[dict] = []
         for r in rows:  # newest first
             if r["role"] not in ("user", "assistant"):
@@ -254,6 +267,18 @@ class ConversationManager:
             # Never re-feed leaked tool-call JSON into the model context —
             # that is the main source of topic stickiness after a bad turn.
             if r["role"] == "assistant" and self._looks_like_tool_json(r["content"]):
+                continue
+            # When the owner has moved on, keep at most one recent reminder
+            # delivery in context so it cannot dominate the reply.
+            if (drop_reminder_noise and r["role"] == "assistant"
+                    and (r["source"] or "") == "reminder"):
+                skipped_reminder_rows += 1
+                if skipped_reminder_rows > 1:
+                    continue
+            # Drop prior assistant "please confirm the reminder" loops when
+            # the current turn is not about reminders.
+            if (drop_reminder_noise and r["role"] == "assistant"
+                    and is_confirm_ask(r["content"] or "")):
                 continue
             out.append({"role": r["role"], "content": r["content"], "id": r["id"]})
             if len(out) >= limit:
@@ -350,6 +375,15 @@ class ConversationManager:
         if decision is not None:
             result = await self._finish_system_reply(decision, person, source="timer")
             return self._seal_verify_turn(result, user_msg_id, turn_source)
+
+        # Close reminder-confirmation / test-reminder loops without the model
+        # when the owner rejects or says it was only a test.
+        closed = await self._try_close_schedule_loop(text, person)
+        if closed is not None:
+            return self._seal_verify_turn(closed, user_msg_id, turn_source)
+        # Topic change after a delivery: clear loop state, then let the model
+        # answer the new subject (focus_instruction steers the prompt).
+        self._maybe_clear_delivery_on_topic_change(text)
 
         # natural-language reminders/timers — deterministic, model-free, so
         # they execute reliably even with no model or a JSON-happy model
@@ -476,17 +510,93 @@ class ConversationManager:
         from ..timeparse import friendly as _f
         return _f(epoch, self.clock.now())
 
+    def _recent_dialogue_rows(self, limit: int = 8) -> list:
+        return self.db.query(
+            "SELECT role, content, source FROM messages "
+            "WHERE COALESCE(archived,0)=0 ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+
+    def _clear_schedule_confirm_state(self) -> None:
+        self.db.execute(
+            "DELETE FROM meta WHERE key IN "
+            "('reminder.pending_confirm','reminder.just_delivered')"
+        )
+
+    def _note_reminder_delivered(self, reminder_id: str, text: str) -> None:
+        self.db.set_meta_json("reminder.just_delivered", {
+            "id": reminder_id, "text": text, "ts": self.clock.now(),
+        })
+
+    def _schedule_loop_flags(self) -> tuple[bool, bool, bool]:
+        recent = self._recent_dialogue_rows(8)
+        prior = recent[1:] if recent and recent[0]["role"] == "user" else recent
+        last_asst = next((r for r in prior if r["role"] == "assistant"), None)
+        assistant_asking = bool(last_asst and is_confirm_ask(last_asst["content"] or ""))
+        recent_delivery = any(
+            r["role"] == "assistant" and (r["source"] or "") == "reminder"
+            for r in prior[:4]
+        )
+        pending = bool(self.db.get_meta("reminder.pending_confirm")
+                       or self.db.get_meta("reminder.just_delivered"))
+        return assistant_asking, recent_delivery, pending
+
+    def _dismiss_open_deliveries(self, person: str) -> None:
+        for rem in self.reminders.list(active_only=False, person=person)[:12]:
+            if rem.status in ("delivered", "waiting_ack") and rem.kind != "timer":
+                try:
+                    self.reminders.acknowledge(rem.id)
+                except Exception:
+                    pass
+
+    def _maybe_clear_delivery_on_topic_change(self, text: str) -> None:
+        assistant_asking, recent_delivery, _ = self._schedule_loop_flags()
+        if topic_change_away_from_schedule(
+            text,
+            recent_reminder_delivery=recent_delivery,
+            assistant_asking_confirm=assistant_asking,
+        ):
+            self._clear_schedule_confirm_state()
+            self._dismiss_open_deliveries("owner")
+
+    async def _try_close_schedule_loop(self, text: str, person: str) -> dict | None:
+        """End confirmation/test-reminder fixation without another model pass."""
+        assistant_asking, recent_delivery, pending = self._schedule_loop_flags()
+        if not should_close_schedule_loop(
+            text,
+            assistant_asking_confirm=assistant_asking,
+            recent_reminder_delivery=recent_delivery,
+            pending_confirm=pending,
+        ):
+            return None
+        self._clear_schedule_confirm_state()
+        self._dismiss_open_deliveries(person)
+        reply = close_loop_reply(text)
+        return await self._finish_system_reply(reply, person, source="chat")
+
     # ------------------------------------------------------------------ generation
     async def _build_messages(self, text: str, person: str,
                               proactive_context: str | None = None,
                               include_user_text: bool = True) -> list[dict]:
         # Memory retrieval must track THIS turn — concatenating recent user
         # turns caused Saturn/reminder bleed into unrelated requests.
+        t_ret0 = _time.perf_counter()
+        extras: list[str] = []
+        summary = self._summary_block()
+        if summary:
+            extras.append(summary)
+        just = self.db.get_meta_json("reminder.just_delivered")
+        after_delivery = bool(just) and not mentions_reminder_topic(text or "")
+        if text and include_user_text:
+            extras.append(focus_instruction(
+                text, after_reminder_delivery=after_delivery,
+            ))
         system = await self.prompt_builder.build_system(
             now_epoch=self.clock.now(), query=text or "", subject=person,
-            extra_blocks=[self._summary_block()] if self._summary_block() else None,
+            extra_blocks=extras or None,
             proactive_context=proactive_context,
         )
+        retrieve_ms = (_time.perf_counter() - t_ret0) * 1000.0
         if self.tools.names():
             system += "\n\n" + self.tools.manifest_text()
         state = self._software_state_text()
@@ -494,13 +604,15 @@ class ConversationManager:
             system += "\n\n" + state
         messages = [{"role": "system", "content": system}]
         summary_until = int(self.db.get_meta("conversation.summary_until_id") or 0)
-        window = [m for m in self._window() if m["id"] > summary_until]
+        window = [m for m in self._window(current_text=text) if m["id"] > summary_until]
         messages += [{"role": m["role"], "content": m["content"]} for m in window]
         # For system-driven turns (reminder delivery) the instruction text is
         # not in the persisted window — send it as the final user message so
         # the model actually sees it.
         if include_user_text and text and (not window or window[-1]["content"] != text):
             messages.append({"role": "user", "content": text})
+        # Stash retrieval timing for the outer generator.
+        self._last_retrieve_ms = round(retrieve_ms, 1)
         return messages
 
     def _software_state_text(self) -> str:
@@ -529,6 +641,7 @@ class ConversationManager:
         allow_schedule = True  # chat turns may schedule when intent is present
         if proactive_context:
             allow_schedule = False  # proactive initiations never create reminders
+        self._last_retrieve_ms = 0.0
         t_build0 = _time.perf_counter()
         messages = await self._build_messages(text, person, proactive_context)
         build_ms = (_time.perf_counter() - t_build0) * 1000.0
@@ -536,7 +649,15 @@ class ConversationManager:
         gate = self._DeltaGate(self._emit)
         on_delta = gate.as_callback()
         self._streaming = True
-        self.last_timing = {"prompt_build_ms": round(build_ms, 1), "model_ms": [], "tool_ms": []}
+        self.last_timing = {
+            "prompt_build_ms": round(build_ms, 1),
+            "retrieve_ms": getattr(self, "_last_retrieve_ms", 0.0),
+            "model_ms": [],
+            "tool_ms": [],
+        }
+        # Owner moved on after a delivery — clear so the next turn is clean.
+        if self.db.get_meta("reminder.just_delivered") and not mentions_reminder_topic(text):
+            self.db.execute("DELETE FROM meta WHERE key='reminder.just_delivered'")
 
         def _tool_ctx() -> dict:
             return {
@@ -1047,6 +1168,7 @@ class ConversationManager:
                 if text:
                     await self._finish_assistant_reply(text, reminder.person, 0, source="reminder")
                     self._log_proactive("reminder_delivery", text, reminder.id)
+                    self._note_reminder_delivered(reminder.id, reminder.text)
                     return
             except ProviderError:
                 pass
@@ -1054,6 +1176,7 @@ class ConversationManager:
         await self._finish_system_reply(text, reminder.person, source="reminder")
         await self._announce(text)  # voice announcement, when enabled (spoken once)
         self._log_proactive("reminder_delivery", text, reminder.id)
+        self._note_reminder_delivered(reminder.id, reminder.text)
 
     async def _deliver_timer(self, timer: Reminder) -> None:
         """Timer completion: ask once about repeating, register the pending

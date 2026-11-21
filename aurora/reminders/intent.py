@@ -57,6 +57,7 @@ def has_scheduling_intent(user_text: str | None) -> bool:
 
 UNAUTHORIZED_SCHEDULE_MSG = (
     "error: cannot schedule a reminder unless the user clearly asked to be "
-    "reminded or to set a timer in this message — ask them to confirm before "
-    "scheduling"
+    "reminded or to set a timer in this message. Do not ask them to confirm "
+    "or rephrase a schedule offer — continue the conversation on their "
+    "current topic instead."
 )

@@ -37,6 +37,42 @@ class MemoryRetriever:
         self.max_facts = max_facts
         self.recent_days = recent_days
 
+    @staticmethod
+    def _wants_deep_recall(query: str) -> bool:
+        """True when FTS/lexical recall is worth running for this turn."""
+        q = (query or "").strip()
+        if not q:
+            return False
+        if re.match(
+            r"^(say|reply|respond|only|just|ok|okay|yes|no|nope|nah|hi+|hello|hey|"
+            r"thanks|thank you)\b",
+            q, re.I,
+        ):
+            return False
+        if len(q) < 12 and not re.search(r"\?", q):
+            return False
+        # Status updates / day-off chatter without a question still benefit
+        # from light lexical match when they name interests explicitly.
+        if re.search(
+            r"(?i)\b(what|who|when|where|why|how|remember|recall|know about|"
+            r"tell me|remind|prefer|project|interested|like about)\b|\?",
+            q,
+        ):
+            return True
+        return len(q) >= 80  # long free-form updates: allow light FTS only
+
+    @staticmethod
+    def _wants_semantic(query: str) -> bool:
+        """Embeddings are expensive — only for clear questions / recall asks."""
+        q = (query or "").strip()
+        if not q:
+            return False
+        return bool(re.search(
+            r"(?i)\?|\b(what|who|when|where|why|how|remember|recall|know about|"
+            r"tell me about)\b",
+            q,
+        ))
+
     async def _semantic_rank(self, query: str, candidates: list[Fact]) -> list[str]:
         """Rank candidate ids by cosine similarity to the query when an
         embedding client is configured; empty list on any failure."""
@@ -68,20 +104,19 @@ class MemoryRetriever:
         for f in self.store.active_facts(subject):
             if f.pinned:
                 picked[f.id] = f
-        # Slot 2: recent facts (last `recent_days` days).
-        for f in self.store.recent_facts(days=self.recent_days, limit=5):
+        # Slot 2: a few recent facts — keep this light so stale topics do not
+        # dominate a new conversational turn.
+        recent_limit = 5 if self._wants_deep_recall(q) else 2
+        for f in self.store.recent_facts(days=self.recent_days, limit=recent_limit):
             picked.setdefault(f.id, f)
 
         budget = max(0, limit - len(picked))
         if budget == 0:
             return list(picked.values())[:limit]
 
-        # Directive / greeting turns gain nothing from FTS+embed and the
-        # embedding round-trip is pure latency — skip slot 3 for those.
-        if (not q
-                or re.match(
-                    r"^(say|reply|respond|only|just|ok|okay|yes|no|hi+|hello|hey)\b",
-                    q, re.I)):
+        # Directive / greeting / pure social turns gain nothing from FTS+embed
+        # and the embedding round-trip is pure latency — skip slot 3.
+        if not q or not self._wants_deep_recall(q):
             return list(picked.values())[:limit]
 
         # Slot 3: query-relevant facts, FTS5 + lexical + optional vector, RRF-merged.
@@ -90,7 +125,11 @@ class MemoryRetriever:
         ranked_lists: list[list[str]] = [[f.id for f in fts_hits], [f.id for f in lexical_hits]]
         seen = {f.id for f in fts_hits}
         vec_candidates = list(fts_hits) + [f for f in lexical_hits if f.id not in seen]
-        vec_ranking = await self._semantic_rank(q, vec_candidates)
+        # Semantic rank only when the user is clearly asking/recalling —
+        # embeddings are the dominant retrieval latency on Portable.
+        vec_ranking: list[str] = []
+        if self._wants_semantic(q):
+            vec_ranking = await self._semantic_rank(q, vec_candidates)
         if vec_ranking:
             ranked_lists.append(vec_ranking)
 

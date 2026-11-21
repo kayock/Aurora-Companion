@@ -3,6 +3,25 @@
 All notable changes to Aurora Companion. The project follows semver-ish versioning
 (see docs/GITHUB_RELEASE.md §6). Dates are UTC.
 
+## [1.0.6] — 2026-11-21
+
+### Fixed
+- **Reminder confirmation fixation:** after a reminder delivery or an unauthorized
+  schedule attempt, Aurora no longer loops on “please confirm…” when the owner
+  says no, explains it was a test, or changes topics. Deterministic close-out
+  handles rejections; prompt focus + window filtering keep deliveries from
+  dominating ordinary chat.
+- **Unauthorized schedule tool error** no longer tells the model to ask for
+  confirmation (that instruction caused the loop). It now says continue on the
+  owner's current topic instead.
+- **Retrieval latency:** skip embedding round-trips for greetings, short social
+  turns, and non-question status updates; keep light FTS when useful.
+
+### Changed
+- Conversation guardrails emphasize companion engagement over reminder/checklist
+  steering, reject repeated confirmations, and prefer tools only when they help
+  the current turn.
+
 ## [1.0.5] — 2026-11-21
 
 ### Fixed
