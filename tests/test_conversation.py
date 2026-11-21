@@ -29,15 +29,17 @@ async def test_basic_turn_persists_and_broadcasts(make_app):
 async def test_tool_loop_set_reminder(make_app):
     rules = [
         (r"(?:\[tool set_reminder result\]|scheduled reminder)", "Done!"),
-        (r"put bread on the shopping list",
+        (r"bread|shopping",
          ChatResult(text="", finish_reason="tool_calls",
                     tool_calls=[ToolCall(name="set_reminder",
                                          arguments=json.dumps({"text": "Check the bread", "when": "in 20 minutes"}))])),
         (r"warmth", "warmth 1 energy ="),
     ]
     app, mock = make_app(rules=rules, overrides={"reminders.follow_up_default_seconds": 300})
-    # phrasing that the deterministic NL parser does not claim → model + tool
-    msg = await app.conversation.submit_user_message("Put bread on the shopping list, in 20 minutes please")
+    # Must include scheduling intent, but avoid the deterministic NL parser
+    # (which only anchors on messages that *start* with "remind me").
+    msg = await app.conversation.submit_user_message(
+        "Please put bread on the shopping list — remind me in 20 minutes")
     rems = app.reminders.list(active_only=True)
     assert len(rems) == 1
     assert rems[0].text == "Check the bread"
@@ -74,14 +76,17 @@ async def test_nl_timer_creates_timer_kind(make_app):
 
 async def test_model_replying_with_tool_json_text_still_executes(make_app):
     """A model that leaks the tool call as plain JSON text in `content` must
-    have that call EXECUTED — the JSON must never surface in the chat."""
+    have that call EXECUTED when the user asked to schedule — the JSON must
+    never surface in the chat."""
     rules = [
-        (r"(?:\[tool set_reminder result\]|scheduled reminder)", "Done, I set the reminder!"),
-        (r"water the plants",
+        (r"(?:\[tool set_reminder result\]|scheduled reminder|cannot schedule)",
+         "Done, I set the reminder!"),
+        (r"water the plants|remind",
          '{"name": "set_reminder", "arguments": {"text": "Water the plants", "when": "in 10 minutes"}}'),
     ]
     app, mock = make_app(rules=rules, overrides={})
-    msg = await app.conversation.submit_user_message("I need to water the plants soon")
+    msg = await app.conversation.submit_user_message(
+        "I need to water the plants — please remind me in 10 minutes")
     rems = app.reminders.list(active_only=True)
     assert len(rems) == 1 and rems[0].source == "assistant_tool"
     assert '"name"' not in msg["content"] and "set_reminder" not in msg["content"]

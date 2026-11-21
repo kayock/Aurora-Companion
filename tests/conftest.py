@@ -25,9 +25,24 @@ T0 = 1795255200.0
 
 
 def make_test_config(tmp_path: Path, overrides: dict | None = None) -> Config:
-    cfg = Config({"data_dir": str(tmp_path / "data")})
+    """Build a Config rooted under pytest's temporary directory.
+
+    Never points at the live Portable store (/var/lib/aurora). Production
+    verification that must touch live data belongs in an explicit, separate
+    harness — not in this automated suite.
+    """
+    data_dir = (tmp_path / "data").resolve()
+    forbidden = Path("/var/lib/aurora").resolve()
+    try:
+        data_dir.relative_to(forbidden)
+        raise RuntimeError("test config must not use /var/lib/aurora")
+    except ValueError:
+        pass
+    cfg = Config({"data_dir": str(data_dir)})
     if overrides:
         for k, v in overrides.items():
+            if k == "data_dir" or str(k).endswith(".data_dir"):
+                raise RuntimeError(f"tests must not override data_dir ({k}={v})")
             cfg.set(k, v)
     return cfg
 

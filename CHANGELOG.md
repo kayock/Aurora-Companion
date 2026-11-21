@@ -3,6 +3,24 @@
 All notable changes to Aurora Companion. The project follows semver-ish versioning
 (see docs/GITHUB_RELEASE.md §6). Dates are UTC.
 
+## [1.0.4] — 2026-11-21
+
+### Fixed
+- **Unauthorized reminders:** a well-formed `set_reminder` tool call is no longer
+  enough to create a task. The current user message must clearly ask to schedule
+  (remind / timer / remember-to / don't-forget-to). Greetings and topic chat that
+  caused four "water the basil" reminders on 1.0.3 are rejected with no side
+  effects. Proactive turns cannot authorize scheduling. Quoted "remind me" does
+  not authorize. Deterministic NL / slash / dashboard paths remain unchanged.
+- **remember_fact** tool similarly requires an explicit remember request so the
+  model cannot invent durable owner facts from ordinary chat.
+- Pytest refuses to open `/var/lib/aurora`, so the automated suite cannot
+  contaminate the live Portable database.
+
+### Notes
+- Confirmed development/test contamination in the live DB is inventoried for
+  owner-approved cleanup; 1.0.4 does not delete personal records automatically.
+
 ## [1.0.3] — 2026-11-21
 
 ### Fixed

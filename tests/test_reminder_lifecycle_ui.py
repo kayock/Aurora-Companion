@@ -102,7 +102,8 @@ async def test_legitimate_reminder_still_schedules(make_app):
     out = await app.tools.call(
         "set_reminder",
         {"text": "check the servers", "when": "in 20 minutes"},
-        {"person": "owner", "on_change": (lambda: None)},
+        {"person": "owner", "on_change": (lambda: None),
+         "user_text": "Please remind me to check the servers in 20 minutes"},
     )
     assert out.startswith("scheduled reminder")
     active = app.reminders.list(active_only=True)
@@ -122,7 +123,7 @@ async def test_system_prompt_omits_relative_countdown(make_app):
     assert rem.id in system
     assert "in 20 minutes" not in system.lower()
     assert "do not recite or count down" in system.lower()
-    assert "only call set_reminder when the user clearly asks" in system.lower()
+    assert "only call set_reminder when the user's current message clearly asks" in system.lower()
 
 
 def test_dashboard_reminder_js_has_active_history_and_delete():

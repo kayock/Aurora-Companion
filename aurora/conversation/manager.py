@@ -425,6 +425,12 @@ class ConversationManager:
                     "Ollama). Reminders and memory keep working without it.")
         if self.compute_guard is not None:
             self.compute_guard.note_foreground()  # user turns preempt background AI
+        # Freeze the authorizing user utterance for the whole tool loop —
+        # later rounds replace `text` with "continue with the tool results".
+        user_request = text
+        allow_schedule = True  # chat turns may schedule when intent is present
+        if proactive_context:
+            allow_schedule = False  # proactive initiations never create reminders
         t_build0 = _time.perf_counter()
         messages = await self._build_messages(text, person, proactive_context)
         build_ms = (_time.perf_counter() - t_build0) * 1000.0
@@ -433,6 +439,16 @@ class ConversationManager:
         on_delta = gate.as_callback()
         self._streaming = True
         self.last_timing = {"prompt_build_ms": round(build_ms, 1), "model_ms": [], "tool_ms": []}
+
+        def _tool_ctx() -> dict:
+            return {
+                "person": person,
+                "tz_offset_minutes": 0,
+                "user_text": user_request,
+                "allow_schedule": allow_schedule,
+                "on_change": (lambda: None),
+            }
+
         try:
             for round_no in range(max_rounds):
                 specs = self.tools.specs() if self.chat_provider.supports_tools() else None
@@ -443,7 +459,7 @@ class ConversationManager:
                 except ProviderError:
                     if specs:
                         # server choked on tools: rebuild clean prompt and retry once without them
-                        messages = await self._build_messages(text, person, proactive_context)
+                        messages = await self._build_messages(user_request, person, proactive_context)
                         gate.reset_for_round(hold_possible_tools=False)
                         result = await self.chat_provider.chat(messages, tools=None, on_delta=on_delta)
                         specs = None
@@ -469,9 +485,7 @@ class ConversationManager:
                         name, raw_args = embedded
                         t_tool0 = _time.perf_counter()
                         args = parse_tool_arguments(raw_args)
-                        output = await self.tools.call(name, args,
-                                                       {"person": person, "tz_offset_minutes": 0,
-                                                        "on_change": (lambda: None)})
+                        output = await self.tools.call(name, args, _tool_ctx())
                         self.last_timing["tool_ms"].append(
                             round((_time.perf_counter() - t_tool0) * 1000.0, 1))
                         await self._emit({"type": "tool", "name": name, "arguments": args,
@@ -508,9 +522,7 @@ class ConversationManager:
                 for i, call in enumerate(result.tool_calls):
                     t_tool0 = _time.perf_counter()
                     args = parse_tool_arguments(call.arguments)
-                    ctx = {"person": person, "tz_offset_minutes": 0,
-                           "on_change": (lambda: None)}
-                    output = await self.tools.call(call.name, args, ctx)
+                    output = await self.tools.call(call.name, args, _tool_ctx())
                     self.last_timing["tool_ms"].append(
                         round((_time.perf_counter() - t_tool0) * 1000.0, 1))
                     await self._emit({"type": "tool", "name": call.name, "arguments": args,

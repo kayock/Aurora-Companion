@@ -16,6 +16,8 @@ shared store at construction.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 from . import __version__
@@ -47,6 +49,34 @@ from .voice.stt import WhisperSTT
 from .voice.tts import KokoroTTS, NoneTTS
 
 
+def _running_under_pytest() -> bool:
+    return ("pytest" in sys.modules) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def assert_data_dir_safe_for_tests(data_dir: Path) -> None:
+    """Refuse to open the live Portable data directory from pytest.
+
+    Automated tests must use temporary directories (see tests/conftest.py).
+    Production may still use /var/lib/aurora when not under pytest.
+    """
+    if not _running_under_pytest():
+        return
+    if os.environ.get("AURORA_ALLOW_PRODUCTION_DATA", "").strip() == "1":
+        return
+    resolved = data_dir.resolve()
+    forbidden = Path("/var/lib/aurora").resolve()
+    try:
+        resolved.relative_to(forbidden)
+    except ValueError:
+        return  # outside the production data tree
+    raise RuntimeError(
+        f"Refusing to use production data_dir {resolved} under pytest. "
+        "Tests must use an isolated temporary directory "
+        "(make_test_config / tmp_path). Set AURORA_ALLOW_PRODUCTION_DATA=1 "
+        "only for an explicitly authorized live-read harness."
+    )
+
+
 class CompanionApp:
     def __init__(self, config: Config, clock: Clock | None = None,
                  seed_path: Path | None = None, chat_provider: ChatProvider | None = None,
@@ -54,6 +84,7 @@ class CompanionApp:
         self.config = config
         self.clock = clock or Clock()
         self.data_dir = config.data_dir()
+        assert_data_dir_safe_for_tests(self.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         # providers (allow injection for tests)

@@ -62,8 +62,9 @@ async def test_malformed_tool_json_executes_and_never_surfaces(make_app):
             except asyncio.TimeoutError:
                 break
 
+    # Intent present ("remind me") but not the NL ^remind-me parser shape.
     msg = await app.conversation.submit_user_message(
-        "Please help me remember to water the basil later")
+        "Could you remind me to water the basil in 30 minutes?")
     await drain()
     assert '"name"' not in msg["content"]
     assert "set_reminder" not in msg["content"]

@@ -13,9 +13,11 @@ commands and the dashboard — nothing depends on tools.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Awaitable, Callable
 
 from ..providers.base import ToolSpec
+from ..reminders.intent import UNAUTHORIZED_SCHEDULE_MSG, has_scheduling_intent
 from ..timeparse import describe_repeat, friendly, parse_repeat, parse_when
 
 ToolHandler = Callable[[dict, dict], Awaitable[str]]
@@ -80,6 +82,13 @@ def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
             text = str(args.get("text", "")).strip()
             when_words = str(args.get("when", "")).strip()
             person = ctx.get("person", "owner")
+            # Authorization: a well-formed payload is NOT enough. The current
+            # user utterance must clearly ask to schedule. Past chat, memory,
+            # and proactive suggestions cannot authorize creation.
+            user_text = ctx.get("user_text")
+            if ctx.get("allow_schedule") is False or not has_scheduling_intent(
+                    user_text if user_text is not None else ""):
+                return UNAUTHORIZED_SCHEDULE_MSG
             if not text:
                 return "error: reminder text required"
             if not when_words:
@@ -108,11 +117,12 @@ def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
 
         registry.register(_spec(
             "set_reminder",
-            "Schedule a reminder ONLY when the user explicitly asks to be reminded "
-            "or to set a timer. Never use this for greetings, check-ins, break "
-            "suggestions, or your own ideas. `text` must be an actionable task "
-            "(e.g. 'check the servers'), and `when` must be the user's timing "
-            "words (e.g. 'in 20 minutes', 'tomorrow at 9am', 'every day at 8am').",
+            "Schedule a reminder ONLY when the user's CURRENT message clearly asks "
+            "to be reminded or to set a timer (e.g. 'remind me…', 'set a timer…'). "
+            "Never call this for greetings, check-ins, break suggestions, quoted "
+            "phrases, past topics, or your own ideas — even if you remember a task. "
+            "`text` must be an actionable task and `when` must be the user's timing "
+            "words (e.g. 'in 20 minutes', 'tomorrow at 9am', 'every Monday at 9am').",
             {"type": "object",
              "properties": {
                  "text": {"type": "string"},
@@ -160,6 +170,12 @@ def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
     if facts is not None:
         async def remember_fact(args, ctx):
             person = ctx.get("person", "owner")
+            user_text = str(ctx.get("user_text") or "")
+            # Do not let the model invent durable "user asked me to…" facts
+            # from ordinary chat — require an explicit remember request.
+            if not re.search(r"(?i)\b(remember|don'?t forget|keep in mind)\b", user_text):
+                return ("error: only store a durable fact when the user asked you "
+                        "to remember it in this message")
             fact = facts.add_fact(
                 str(args.get("content", "")), subject=person,
                 category=str(args.get("category", "other")) or "other",
@@ -171,7 +187,9 @@ def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
 
         registry.register(_spec(
             "remember_fact",
-            "Store a durable long-term fact about the user (preferences, projects, people, plans).",
+            "Store a durable long-term fact ONLY when the user asked you to remember "
+            "something in the current message (e.g. 'remember that…'). Never invent "
+            "facts from greetings, reminders, or your own suggestions.",
             {"type": "object",
              "properties": {"content": {"type": "string"}, "category": {"type": "string"},
                             "pinned": {"type": "boolean"}},
