@@ -1,0 +1,13 @@
+# Aurora — unified local AI companion dependencies.
+# Python 3.10+ (3.12 tested). Everything runs locally; nothing here is mandatory
+# beyond the first five lines.
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.26
+PyYAML>=6.0
+pytest>=7.0          # test suite
+
+# --- optional ---
+# edge-tts            # cloud TTS alternative (requires internet; not local)
+# faster-whisper      # local speech-to-text (voice input)
+# sounddevice         # only needed by external voice servers, not Aurora itself

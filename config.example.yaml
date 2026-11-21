@@ -1,0 +1,72 @@
+# Aurora configuration — copy to config.yaml and edit.
+# Every key is optional; defaults live in aurora/config.py.
+
+data_dir: data            # where aurora.db (all state) lives
+host: 127.0.0.1           # 0.0.0.0 + server.auth_token for LAN access (never public)
+port: 8795
+user_name: "Alex"         # what the companion calls you
+
+provider:
+  chat: local             # which preset serves conversation turns
+  background: same        # preset for extraction/consolidation/appraisal/evolution
+                          # ("same" = reuse the chat model; a smaller local model works well)
+  presets:
+    local:
+      type: openai_compat
+      base_url: http://127.0.0.1:1234/v1     # LM Studio; llama.cpp: http://127.0.0.1:8080/v1
+      model: local-model                     # the model id shown by your server
+      api_key: ""                            # leave empty for local servers
+      temperature: 0.8
+      max_tokens: 1024
+
+embeddings:
+  enabled: false          # optional semantic recall (OpenAI-compatible /v1/embeddings)
+  base_url: http://127.0.0.1:1234/v1/embeddings
+  model: text-embedding
+
+memory:
+  extraction_every_n_user_turns: 4
+  max_facts_in_prompt: 12
+  consolidation_idle_minutes: 15
+
+personality:
+  evolution:
+    every_n_user_turns: 40
+    baseline_review_every: 3
+
+proactive:
+  enabled: true
+  quiet_start: "23:00"
+  quiet_end: "07:30"
+
+voice:
+  stt: none               # none | whisper (needs `pip install faster-whisper`) |
+                          # kayock (the host's existing Faster-Whisper service)
+  tts: none               # none | kokoro (local server) | edge (cloud!) |
+                          # kayock (existing OpenAI-compatible speech adapter)
+  # --- Kayock Voice (used as-is; Aurora only calls, never configures) ---
+  kayock_tts_url: http://127.0.0.1:8768/v1   # speech adapter (Portable: 10.0.0.45:8768)
+  kayock_tts_api_key: ""
+  kayock_tts_model: kokoro                   # "model" field for /v1/audio/speech
+  kayock_stt_url: http://127.0.0.1:8769/v1   # faster-whisper service
+  kayock_stt_api_key: ""
+  kayock_stt_model: base.en                  # "model" field for /v1/audio/transcriptions
+  voice_id: am_adam       # initial preference; ids are discovered live from GET /v1/models
+  format: mp3             # mp3 | wav
+  auto_speak: false       # dashboard "speak replies" plays audio client-side
+  server_speak: false     # server-side synthesis hook (API-only setups)
+
+# Resource-aware operation: background AI defers when compute is needed
+# elsewhere (see docs/PORTABLE_DEPLOY.md §6).
+resources:
+  traffic_light_url: ""    # existing GPU Traffic Light; enable AFTER verifying its protocol
+  probe_seconds: 30
+  busy_markers: [busy, occupied, loading, inferencing]
+  background_enabled: true
+  model_health_ttl_seconds: 60
+  foreground_grace_seconds: 120
+
+# LAN auth: when set, every /api/* call needs this token. Generate:
+#   openssl rand -hex 32
+server:
+  auth_token: ""

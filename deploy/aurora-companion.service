@@ -1,0 +1,71 @@
+# systemd unit template for the Aurora Companion on Ubuntu Portable.
+#
+# Install (adjust paths if you used different AURORA_HOME / CONFIG_DIR):
+#   sudo cp deploy/aurora-companion.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now aurora-companion.service
+#
+# Aurora is deliberately NOT tied to the Kayock services with Requires=:
+# it runs (with voice honestly degraded) even when they are down, so a
+# restart order dependency must not exist. It is also deliberately NOT
+# tied to any model server: other applications on Portable own their
+# models, and Aurora yields to them.
+
+[Unit]
+Description=Aurora Companion — unified local AI companion (Portable)
+Documentation=https://aurora.local/docs/PORTABLE_DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aurora
+Group=aurora
+
+# Paths — adjust in one place here or override via an override file:
+#   systemctl edit aurora-companion
+EnvironmentFile=-/etc/aurora/aurora.env
+WorkingDirectory=/opt/aurora-companion
+ExecStart=/opt/aurora-companion/venv/bin/python /opt/aurora-companion/run.py --config /etc/aurora/config.yaml
+
+# Restart handling: crash or config error -> restart with a steady backoff.
+# Aurora's own recovery (missed-reminder replay, model health probes) makes
+# restarts safe; systemd only has to bring the process back.
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Logging: everything goes to the journal (Aurora logs via uvicorn/stdout).
+#   journalctl -u aurora-companion -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aurora-companion
+
+# Lightweight companion posture: no performance tuning that would fight
+# the machine's other workloads, no resource reservations. Aurora holds no
+# model and no GPU memory; inference happens only in short request bursts.
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# Modest hardening (Aurora needs no root, no devices, no kernel tweaks).
+# Filesystem model — separation of concerns, enforced:
+#   app files (/opt/aurora-companion)  read-only
+#   configuration (/etc/aurora)        read + preference persistence (voice
+#                                      selection; config.yaml is 600 aurora:aurora,
+#                                      so the auth token inside stays private)
+#   data (/var/lib/aurora)             read-write
+# Everything else on the machine — including every other service's files —
+# is invisible or read-only to Aurora.
+NoNewPrivileges=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/aurora /etc/aurora
+PrivateTmp=true
+# Bytecode caching would want to write into the read-only venv; skip it.
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

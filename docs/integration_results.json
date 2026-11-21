@@ -1,0 +1,231 @@
+{
+ "steps": [
+  {
+   "step": "turn 1 (real chat)",
+   "ok": true,
+   "detail": "Hi Sam! That's great to hear about your half marathon training. Riverside Park is a beautiful place for a morn"
+  },
+  {
+   "step": "turn 2 (real chat)",
+   "ok": true,
+   "detail": "Good luck with your half marathon training, Sam! March 15 gives you a nice timeline to prepare. I'll make sure"
+  },
+  {
+   "step": "memory extraction (real LLM ops)",
+   "ok": true,
+   "detail": "added=['f_f7264faa', 'f_6e193265'] superseded=[] rejected=1 reasons=['duplicate of f_245308c1']"
+  },
+  {
+   "step": "recall of stored facts in reply",
+   "ok": true,
+   "detail": "I don't have any specific details about your training plan in my memory yet. I know you're training for a half marathon on March 15, that you run in Riverside P"
+  },
+  {
+   "step": "reminder delivered through the model",
+   "ok": true,
+   "detail": "Time to drink some water before your next run! Staying hydrated is important, especially with your half marathon trainin"
+  },
+  {
+   "step": "persona evolution (evidence-gated)",
+   "ok": true,
+   "detail": "v3: No changes made due to insufficient evidence for evolution. | skipped: "
+  },
+  {
+   "step": "idle consolidation (summary + tidy)",
+   "ok": true,
+   "detail": "{\"merged\": 4, \"superseded\": 1, \"archived\": 0, \"lessons\": 0}"
+  },
+  {
+   "step": "mood/affinity updated",
+   "ok": true,
+   "detail": "{\"energy\": 0.59, \"warmth\": 1.0, \"affinity\": 54.0, \"tier\": \"friendly stranger\", \"grudge\": false}"
+  },
+  {
+   "step": "restart persistence (real run)",
+   "ok": true,
+   "detail": "facts={'total': 10, 'active': 4} history=7 persona_v=3 open_reminders=0"
+  }
+ ],
+ "facts_after_extraction": [
+  {
+   "id": "f_f7264faa",
+   "content": "Sam is training for a half marathon",
+   "subject": "owner",
+   "category": "project",
+   "kind": "",
+   "event_date": null,
+   "expires_at": null,
+   "weight": 1.5,
+   "source": "auto",
+   "trust": "confirmed",
+   "pinned": false,
+   "archived": false,
+   "archive_reason": null,
+   "merged_into": null,
+   "superseded_by": null,
+   "superseded_at": null,
+   "valid_from": "2026-11-21",
+   "valid_to": null,
+   "evidence": [
+    {
+     "message_id": 1,
+     "ts": 1795222349.830799,
+     "quote": "I've started training for a half marathon"
+    }
+   ],
+   "versions": [],
+   "emotional_note": "",
+   "created_at": 1795222357.6905947,
+   "updated_at": 1795222357.6905947
+  },
+  {
+   "id": "f_245308c1",
+   "content": "User's half marathon is scheduled for March 15 next year",
+   "subject": "owner",
+   "category": "event",
+   "kind": "",
+   "event_date": null,
+   "expires_at": null,
+   "weight": 1.5,
+   "source": "auto",
+   "trust": "confirmed",
+   "pinned": false,
+   "archived": false,
+   "archive_reason": null,
+   "merged_into": null,
+   "superseded_by": null,
+   "superseded_at": null,
+   "valid_from": "2026-11-21",
+   "valid_to": null,
+   "evidence": [
+    {
+     "message_id": 3,
+     "ts": 1795222350.77221,
+     "quote": "My race is on March 15 next year"
+    }
+   ],
+   "versions": [],
+   "emotional_note": "",
+   "created_at": 1795222356.6710446,
+   "updated_at": 1795222356.6710446
+  },
+  {
+   "id": "f_442e69d5",
+   "content": "User is training for a half marathon",
+   "subject": "owner",
+   "category": "project",
+   "kind": "",
+   "event_date": null,
+   "expires_at": null,
+   "weight": 1.5,
+   "source": "auto",
+   "trust": "confirmed",
+   "pinned": false,
+   "archived": false,
+   "archive_reason": null,
+   "merged_into": null,
+   "superseded_by": null,
+   "superseded_at": null,
+   "valid_from": "2026-11-21",
+   "valid_to": null,
+   "evidence": [
+    {
+     "message_id": 1,
+     "ts": 1795222349.830799,
+     "quote": "I've started training for a half marathon"
+    }
+   ],
+   "versions": [],
+   "emotional_note": "",
+   "created_at": 1795222356.6699154,
+   "updated_at": 1795222356.6699154
+  },
+  {
+   "id": "f_6e193265",
+   "content": "Sam runs in Riverside Park before work at 6:30 AM",
+   "subject": "owner",
+   "category": "habit",
+   "kind": "",
+   "event_date": null,
+   "expires_at": null,
+   "weight": 1.0,
+   "source": "auto",
+   "trust": "confirmed",
+   "pinned": false,
+   "archived": false,
+   "archive_reason": null,
+   "merged_into": null,
+   "superseded_by": null,
+   "superseded_at": null,
+   "valid_from": "2026-11-21",
+   "valid_to": null,
+   "evidence": [
+    {
+     "message_id": 1,
+     "ts": 1795222349.830799,
+     "quote": "I run mornings in Riverside Park before work, usually around 6:30"
+    }
+   ],
+   "versions": [],
+   "emotional_note": "",
+   "created_at": 1795222357.6909454,
+   "updated_at": 1795222357.6909454
+  },
+  {
+   "id": "f_31c8e42f",
+   "content": "User runs in Riverside Park before work at around 6:30 AM",
+   "subject": "owner",
+   "category": "habit",
+   "kind": "",
+   "event_date": null,
+   "expires_at": null,
+   "weight": 1.0,
+   "source": "auto",
+   "trust": "confirmed",
+   "pinned": false,
+   "archived": false,
+   "archive_reason": null,
+   "merged_into": null,
+   "superseded_by": null,
+   "superseded_at": null,
+   "valid_from": "2026-11-21",
+   "valid_to": null,
+   "evidence": [
+    {
+     "message_id": 1,
+     "ts": 1795222349.830799,
+     "quote": "I run mornings in Riverside Park before work, usually around 6:30"
+    }
+   ],
+   "versions": [],
+   "emotional_note": "",
+   "created_at": 1795222356.6708431,
+   "updated_at": 1795222356.6708431
+  }
+ ],
+ "evolution": {
+  "fired": true,
+  "version": 3,
+  "summary": "No changes made due to insufficient evidence for evolution.",
+  "reason": "The evidence provided does not support any lasting changes to the persona; the current persona remains consistent with the original and anchor traits.",
+  "anchor": "Warm but honest; refuses to be a yes-machine; treats memories as real; protective of the person's rest and focus; never invents facts.",
+  "skipped": ""
+ },
+ "consolidation": {
+  "ts": 1795222410.2287285,
+  "summary": "We talked about Sam's training for a half marathon on March 15, including his routine of running in Riverside Park around 6:30 AM before work. He mentioned he was starting his training and wished me luck for the race. I noted his basic schedule but still don't have the specifics of his training plan, like his weekly mileage or pace goals, which would be important to remember if he shares them later.",
+  "merged": 4,
+  "superseded": 1,
+  "archived": 0,
+  "lessons": 0,
+  "skipped": []
+ },
+ "mood": {
+  "energy": 0.59,
+  "warmth": 1.0,
+  "affinity": 54.0,
+  "tier": "friendly stranger",
+  "grudge": false
+ },
+ "ok": true
+}

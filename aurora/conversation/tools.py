@@ -1,0 +1,206 @@
+"""Tool registry + implementations.
+
+Tools follow the OpenAI function-calling dialect (Luna's @tool registry
+pattern). The reminder and memory tools are the important ones: they let
+the model create/manage reminders and inspect its own memory mid-conversation,
+while every mutation still flows through the same store the dashboard uses.
+
+When the active provider cannot do tool calls, the conversation manager
+skips the loop entirely and the user can still do everything through slash
+commands and the dashboard — nothing depends on tools.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Awaitable, Callable
+
+from ..providers.base import ToolSpec
+from ..timeparse import describe_repeat, friendly, parse_repeat, parse_when
+
+ToolHandler = Callable[[dict, dict], Awaitable[str]]
+
+
+class ToolRegistry:
+    def __init__(self) -> None:
+        self._tools: dict[str, tuple[ToolSpec, ToolHandler]] = {}
+
+    def register(self, spec: ToolSpec, handler: ToolHandler) -> None:
+        self._tools[spec.name] = (spec, handler)
+
+    def specs(self, names: list[str] | None = None) -> list[ToolSpec]:
+        if names is None:
+            return [spec for spec, _ in self._tools.values()]
+        return [self._tools[n][0] for n in names if n in self._tools]
+
+    def names(self) -> list[str]:
+        return list(self._tools)
+
+    async def call(self, name: str, arguments: dict, ctx: dict) -> str:
+        entry = self._tools.get(name)
+        if entry is None:
+            return f"error: unknown tool {name}"
+        spec, handler = entry
+        try:
+            return await handler(arguments, ctx)
+        except Exception as exc:  # tool errors go back to the model, not the user
+            return f"error: {exc}"
+
+    def manifest_text(self) -> str:
+        lines = [f"- {s.name}: {s.description}" for s in self.specs()]
+        return "Tools you may call this turn:\n" + "\n".join(lines)
+
+
+def _spec(name: str, description: str, params: dict) -> ToolSpec:
+    return ToolSpec(name=name, description=description, parameters=params)
+
+
+def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
+    """Build the standard toolset. `services` carries the app's subsystems:
+    reminders (store), clock, config, memory (store), user_name."""
+    registry = ToolRegistry()
+    reminders: Any = services.get("reminders")
+    clock = services.get("clock")
+    facts: Any = services.get("memory")
+    config = services.get("config")
+    min_repeat = int((config.get("reminders.min_repeat_seconds", 60) if config else 60))
+
+    # ---- time ----
+    async def get_time(_args, _ctx):
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(clock.now(), tz=timezone.utc).strftime(
+            "%A %Y-%m-%d %H:%M UTC")
+
+    registry.register(_spec("get_time", "Get the current date and time.", {"type": "object", "properties": {}}), get_time)
+
+    # ---- reminders ----
+    if reminders is not None:
+        async def set_reminder(args, ctx):
+            text = str(args.get("text", "")).strip()
+            when_words = str(args.get("when", "")).strip()
+            person = ctx.get("person", "owner")
+            if not text:
+                return "error: reminder text required"
+            due = parse_when(when_words, clock.now(), tz_offset_minutes=ctx.get("tz_offset_minutes", 0))
+            if due is None:
+                return (f"error: could not understand the time \"{when_words}\". "
+                        "Ask the user to rephrase, e.g. 'in 20 minutes' or 'tomorrow at 9am'.")
+            if due <= clock.now() - 5:
+                return "error: that time is already in the past"
+            repeat = parse_repeat(when_words)
+            follow_up = bool(args.get("follow_up", False))
+            rem = reminders.add(
+                text, due, repeat=repeat, follow_up=follow_up,
+                project=str(args.get("project", "")), person=person, source="assistant_tool",
+            )
+            ctx.get("on_change", (lambda: None))()
+            rep = f", repeating {describe_repeat(repeat)}" if repeat else ""
+            return f"scheduled reminder {rem.id}: \"{text}\" for {friendly(due, clock.now())}{rep}"
+
+        registry.register(_spec(
+            "set_reminder",
+            "Schedule a reminder for the user. Pass their own timing words as `when` "
+            "(e.g. 'in 20 minutes', 'tomorrow at 9am', 'every day at 8am', 'next monday at 6pm').",
+            {"type": "object",
+             "properties": {
+                 "text": {"type": "string"},
+                 "when": {"type": "string"},
+                 "project": {"type": "string"},
+                 "follow_up": {"type": "boolean", "description": "repeat until acknowledged"},
+             },
+             "required": ["text", "when"]}), set_reminder)
+
+        async def list_reminders(args, ctx):
+            person = ctx.get("person", "owner")
+            items = reminders.list(active_only=True, person=person)
+            if not items:
+                return "no active reminders"
+            return "\n".join(
+                f"[{r.id}] \"{r.text}\" due {friendly(r.due_at, clock.now())}"
+                + (f" (recurring)" if r.recurring else "")
+                + (f" (follow-up {r.attempts})" if r.attempts else "")
+                for r in items)
+
+        registry.register(_spec("list_reminders", "List the user's active reminders.",
+                                {"type": "object", "properties": {}}), list_reminders)
+
+        async def cancel_reminder(args, ctx):
+            rem = reminders.cancel(str(args.get("id", "")))
+            ctx.get("on_change", (lambda: None))()
+            return f"cancelled {rem.id}" if rem else "reminder not found"
+
+        registry.register(_spec("cancel_reminder", "Cancel a reminder by id.",
+                                {"type": "object", "properties": {"id": {"type": "string"}},
+                                 "required": ["id"]}), cancel_reminder)
+
+        async def snooze_reminder(args, ctx):
+            seconds = int(args.get("seconds", 600))
+            rem = reminders.snooze(str(args.get("id", "")), seconds)
+            ctx.get("on_change", (lambda: None))()
+            return f"snoozed {rem.id} by {seconds}s" if rem else "reminder not found"
+
+        registry.register(_spec("snooze_reminder", "Snooze a reminder by id for N seconds.",
+                                {"type": "object",
+                                 "properties": {"id": {"type": "string"}, "seconds": {"type": "integer"}},
+                                 "required": ["id"]}), snooze_reminder)
+
+    # ---- memory ----
+    if facts is not None:
+        async def remember_fact(args, ctx):
+            person = ctx.get("person", "owner")
+            fact = facts.add_fact(
+                str(args.get("content", "")), subject=person,
+                category=str(args.get("category", "other")) or "other",
+                source="user_command",
+                evidence=ctx.get("evidence") or [],
+                weight=1.5, pinned=bool(args.get("pinned", False)),
+            )
+            return f"remembered (fact {fact.id}): {fact.content}"
+
+        registry.register(_spec(
+            "remember_fact",
+            "Store a durable long-term fact about the user (preferences, projects, people, plans).",
+            {"type": "object",
+             "properties": {"content": {"type": "string"}, "category": {"type": "string"},
+                            "pinned": {"type": "boolean"}},
+             "required": ["content"]}), remember_fact)
+
+        async def recall_facts(args, ctx):
+            person = ctx.get("person", "owner")
+            hits = facts.facts_fts(str(args.get("query", "")), subject=person, limit=8)
+            if not hits:
+                return "nothing found in memory"
+            return "\n".join(f"[{f.id}] {f.content}" for f in hits)
+
+        registry.register(_spec("recall_facts", "Search your long-term memory.",
+                                {"type": "object", "properties": {"query": {"type": "string"}},
+                                 "required": ["query"]}), recall_facts)
+
+        async def forget_fact(args, ctx):
+            person = ctx.get("person", "owner")
+            fact_id = str(args.get("id", ""))
+            fact = facts.get_fact(fact_id)
+            if fact is None or fact.subject != person:
+                return "fact not found"
+            facts.archive_fact(fact_id, "user_request")
+            return f"forgot (archived) {fact_id}"
+
+        registry.register(_spec("forget_fact", "Retire a fact from memory by id (user asked to forget).",
+                                {"type": "object", "properties": {"id": {"type": "string"}},
+                                 "required": ["id"]}), forget_fact)
+
+        async def update_fact(args, ctx):
+            fact_id = str(args.get("id", ""))
+            fact = facts.get_fact(fact_id)
+            if fact is None:
+                return "fact not found"
+            new = facts.supersede_fact(fact_id, str(args.get("content", "")), source="user_command")
+            return f"updated: {new.id} replaces {fact_id}"
+
+        registry.register(_spec("update_fact", "Correct/replace an outdated fact with new content.",
+                                {"type": "object",
+                                 "properties": {"id": {"type": "string"}, "content": {"type": "string"}},
+                                 "required": ["id", "content"]}), update_fact)
+
+    return registry

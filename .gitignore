@@ -1,0 +1,46 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# --- Aurora runtime state: never commit real data, config or secrets ---
+data/
+data-demo/
+config.yaml
+*.db
+*.db-wal
+*.db-shm
+
+# Credentials, tokens, certificates (generated locally by deploy/make-cert.sh)
+*.env
+!deploy/aurora.env.example
+*.crt
+*.key
+*.pem
+secrets/
+
+# --- Backups ---
+*.db.gz
+backups/
+
+# --- Editor / OS noise ---
+*.log
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Node (dashboard tooling, if ever used) ---
+node_modules/
+
+# local project/release staging
+*.zip
+dist/
+build/
+.coverage
+htmlcov/

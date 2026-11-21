@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aurora — Unified Companion</title>
+<style>
+:root{
+  --bg:#0f1219; --panel:#171c26; --panel2:#1e2532; --line:#2a3345;
+  --text:#e6e9f0; --dim:#8b94a7; --accent:#7aa2f7; --accent2:#9ece6a;
+  --warn:#e0af68; --danger:#f7768e; --radius:10px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
+body{font-size:clamp(14px,1.6vw,16px)}
+header{display:flex;align-items:center;gap:.6rem;padding:.6rem 1rem;
+  border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5;flex-wrap:wrap}
+header h1{font-size:clamp(16px,2.4vw,20px);margin:0;font-weight:600}
+header .status{color:var(--dim);font-size:.8rem}
+#tabs{display:flex;gap:.25rem;padding:.5rem 1rem;overflow-x:auto;border-bottom:1px solid var(--line)}
+#tabs button{background:none;border:1px solid transparent;color:var(--dim);padding:.45rem .8rem;
+  border-radius:999px;cursor:pointer;font-size:.9rem;white-space:nowrap}
+#tabs button.active{color:var(--text);background:var(--panel2);border-color:var(--line)}
+main{padding:1rem;max-width:1100px;margin:0 auto}
+.tab{display:none}
+.tab.active{display:block}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:1rem;margin-bottom:1rem}
+h2{font-size:1.05rem;margin:.2rem 0 .8rem}
+h3{font-size:.92rem;color:var(--dim);margin:1rem 0 .4rem;text-transform:uppercase;letter-spacing:.05em}
+/* chat */
+#chatlog{display:flex;flex-direction:column;gap:.6rem;max-height:60vh;overflow-y:auto;
+  padding-right:.3rem}
+.msg{max-width:85%;padding:.55rem .8rem;border-radius:12px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.msg.user{align-self:flex-end;background:#2a3b5c}
+.msg.assistant{align-self:flex-start;background:var(--panel2);border:1px solid var(--line)}
+.msg .src{display:block;font-size:.68rem;color:var(--dim);margin-top:.3rem}
+#chatbar{display:flex;gap:.5rem;margin-top:.8rem}
+#chatbar input{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--text);
+  padding:.7rem .9rem;border-radius:10px;font-size:1rem;min-width:0}
+button.primary{background:var(--accent);color:#0b1020;border:none;padding:.6rem 1.1rem;
+  border-radius:10px;cursor:pointer;font-weight:600;font-size:.95rem}
+button.ghost{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+  padding:.5rem .9rem;border-radius:10px;cursor:pointer;font-size:.9rem}
+button.danger{background:var(--danger);color:#200b10;border:none;padding:.45rem .8rem;
+  border-radius:8px;cursor:pointer;font-size:.82rem}
+/* tables & lists */
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th,td{text-align:left;padding:.5rem .55rem;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--dim);font-weight:500;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
+.tblwrap{overflow-x:auto}
+.fact{border:1px solid var(--line);border-radius:8px;padding:.6rem .8rem;margin-bottom:.5rem;background:var(--panel2)}
+.fact .meta{font-size:.72rem;color:var(--dim);margin-top:.3rem}
+.badge{display:inline-block;font-size:.68rem;padding:.12rem .5rem;border-radius:999px;
+  border:1px solid var(--line);color:var(--dim);margin-right:.3rem}
+.badge.pin{color:var(--warn)} .badge.auto{color:var(--accent)} .badge.man{color:var(--accent2)}
+.row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+input,select,textarea{background:var(--panel2);border:1px solid var(--line);color:var(--text);
+  padding:.55rem .7rem;border-radius:8px;font-size:.92rem;max-width:100%}
+textarea{width:100%;min-height:110px;font-family:inherit;line-height:1.4}
+label.switch{display:flex;align-items:center;gap:.6rem;padding:.45rem 0;cursor:pointer}
+.small{font-size:.78rem;color:var(--dim)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:.3rem .9rem;font-size:.9rem}
+.kv .k{color:var(--dim)}
+.toast{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:var(--panel2);
+  border:1px solid var(--line);padding:.6rem 1rem;border-radius:10px;font-size:.85rem;
+  opacity:0;transition:opacity .3s;pointer-events:none;max-width:90vw}
+.toast.show{opacity:1}
+#btn-mic.rec{background:var(--danger);color:#200b10;animation:pulse 1.2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+button.ghost:disabled{opacity:.45;cursor:not-allowed}
+@media (max-width:640px){
+  .msg{max-width:95%}
+  main{padding:.7rem}
+  .panel{padding:.8rem}
+}
+#chatlog::-webkit-scrollbar,#tabs::-webkit-scrollbar{width:8px;height:8px}
+#chatlog::-webkit-scrollbar-thumb,#tabs::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+</style>
+</head>
+<body>
+<header>
+  <h1>☉ Aurora</h1>
+  <span class="status" id="statusline">connecting…</span>
+</header>
+<nav id="tabs">
+  <button data-tab="chat" class="active">Chat</button>
+  <button data-tab="memory">Memory</button>
+  <button data-tab="reminders">Reminders</button>
+  <button data-tab="persona">Personality</button>
+  <button data-tab="proactive">Proactive</button>
+  <button data-tab="permissions">Privacy</button>
+  <button data-tab="people">People</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+<main>
+  <!-- ============ CHAT ============ -->
+  <section class="tab active" id="tab-chat">
+    <div class="panel">
+      <div class="row" style="justify-content:space-between;margin-bottom:.6rem">
+        <h2 style="margin:0">Conversation</h2>
+        <div class="row">
+          <button class="ghost" id="btn-focus">Focus 60 min</button>
+          <button class="ghost" id="btn-unfocus">End focus</button>
+        </div>
+      </div>
+      <div id="chatlog"></div>
+      <form id="chatbar">
+        <button class="ghost" type="button" id="btn-mic" title="Record voice (enable microphone in Privacy)">🎤</button>
+        <input id="chatinput" placeholder="Say something… ( /help for commands )" autocomplete="off">
+        <button class="primary" type="submit">Send</button>
+      </form>
+      <div class="row" id="voicerow" style="margin-top:.5rem">
+        <span class="small" id="voiceline" style="flex:1"></span>
+        <label class="switch small"><input type="checkbox" id="cb-autospeak"> speak replies</label>
+        <button class="ghost" id="btn-speak-last" title="Speak the latest reply">🔊 Speak last</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MEMORY ============ -->
+  <section class="tab" id="tab-memory">
+    <div class="panel">
+      <h2>Long-term memory</h2>
+      <div class="row" style="margin-bottom:.6rem">
+        <input id="mem-q" placeholder="Search memory…">
+        <select id="mem-view">
+          <option value="active">Active</option>
+          <option value="archived">Archived / superseded</option>
+          <option value="all">All</option>
+        </select>
+        <button class="ghost" onclick="loadMemory()">Search</button>
+        <a class="ghost" href="/api/memory/export" download="aurora-memory.json" style="text-decoration:none">Export JSON</a>
+      </div>
+      <div id="mem-list"></div>
+      <h3>Add a fact</h3>
+      <div class="row">
+        <input id="mem-new" placeholder="e.g. Sarah's birthday is May 3" style="flex:1;min-width:220px">
+        <button class="primary" onclick="addFact()">Add</button>
+      </div>
+      <h3>Consolidation changelog</h3>
+      <div id="mem-changelog" class="small"></div>
+    </div>
+  </section>
+
+  <!-- ============ REMINDERS ============ -->
+  <section class="tab" id="tab-reminders">
+    <div class="panel">
+      <h2>Reminders</h2>
+      <form id="remform" class="row" style="margin-bottom:.8rem">
+        <input id="rem-text" placeholder="What?" required style="flex:2;min-width:160px">
+        <input id="rem-when" placeholder="When? (in 10 minutes / tomorrow at 9am / every day at 8am)" required style="flex:3;min-width:200px">
+        <label class="switch small"><input type="checkbox" id="rem-follow"> nag until done</label>
+        <button class="primary" type="submit">Add</button>
+      </form>
+      <div id="rem-list" class="tblwrap"></div>
+      <h3>Delivery log</h3>
+      <div id="rem-deliveries" class="small"></div>
+    </div>
+  </section>
+
+  <!-- ============ PERSONALITY ============ -->
+  <section class="tab" id="tab-persona">
+    <div class="panel">
+      <h2>Personality</h2>
+      <div id="persona-kv" class="kv"></div>
+      <div class="row" style="margin:.8rem 0">
+        <button class="primary" onclick="evolveNow()">Evolve now</button>
+        <button class="ghost" onclick="evolveNow(true)">Baseline review</button>
+        <span class="small" id="evolve-result"></span>
+      </div>
+      <h3>Effective prompt (evolved)</h3>
+      <textarea id="persona-prompt"></textarea>
+      <h3>Style</h3>
+      <textarea id="persona-style" style="min-height:60px"></textarea>
+      <div class="row" style="margin-top:.5rem">
+        <button class="ghost" onclick="savePersona()">Save manual edit</button>
+        <span class="small">The seed stays read-only; edits write the evolved copy. Rollback restores any version.</span>
+      </div>
+      <h3>Evolution history</h3>
+      <div id="persona-history"></div>
+      <h3>Mood &amp; relationship</h3>
+      <div id="mood-kv" class="kv"></div>
+    </div>
+  </section>
+
+  <!-- ============ PROACTIVE ============ -->
+  <section class="tab" id="tab-proactive">
+    <div class="panel">
+      <h2>Proactive participation</h2>
+      <div id="pro-kv" class="kv"></div>
+      <div class="row" style="margin:.8rem 0">
+        <button class="ghost" onclick="tickProactive()">Run one tick now</button>
+        <span class="small" id="pro-decision"></span>
+      </div>
+      <h3>Initiation log</h3>
+      <div id="pro-log"></div>
+    </div>
+  </section>
+
+  <!-- ============ PRIVACY ============ -->
+  <section class="tab" id="tab-permissions">
+    <div class="panel">
+      <h2>Privacy &amp; permissions</h2>
+      <p class="small">Everything is off by default. Nothing is captured server-side: the
+      browser only records/shares when you enable it here and act.</p>
+      <div id="perm-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ PEOPLE ============ -->
+  <section class="tab" id="tab-people">
+    <div class="panel">
+      <h2>People</h2>
+      <div id="people-list"></div>
+      <h3>Add person</h3>
+      <div class="row">
+        <input id="people-name" placeholder="Name">
+        <input id="people-pron" placeholder="Pronouns (optional)">
+        <button class="primary" onclick="addPerson()">Add</button>
+      </div>
+      <p class="small">Each person's facts are stored separately; guests never see the
+      owner's memories. Voice recognition needs enrolled voice prints (Privacy → microphone).</p>
+    </div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section class="tab" id="tab-settings">
+    <div class="panel">
+      <h2>Settings</h2>
+      <div class="kv" id="settings-kv"></div>
+      <h3>Model preset (OpenAI-compatible)</h3>
+      <div class="row">
+        <input id="set-base" placeholder="base_url e.g. http://127.0.0.1:1234/v1" style="flex:2;min-width:200px">
+        <input id="set-model" placeholder="model id" style="flex:1;min-width:120px">
+        <button class="primary" onclick="saveModel()">Save</button>
+        <button class="ghost" onclick="testProvider()">Test</button>
+      </div>
+      <p class="small" id="set-result"></p>
+      <h3>Background model</h3>
+      <div class="row">
+        <select id="set-bg">
+          <option value="same">same as chat model</option>
+          <option value="local">separate preset (advanced)</option>
+        </select>
+        <span class="small">Used for memory extraction, consolidation, mood appraisal and persona evolution.</span>
+      </div>
+      <h3>Voice (Kayock speech adapter)</h3>
+      <div class="row">
+        <select id="set-voice" style="min-width:200px"><option value="">…</option></select>
+        <button class="ghost" onclick="loadVoices(true)">Refresh voices</button>
+        <button class="ghost" onclick="testVoice()">Test voice</button>
+      </div>
+      <p class="small" id="voice-info">Voice ids are discovered live from the adapter (GET /v1/models); selecting one stores it in Aurora's config.</p>
+      <h3>Access token (LAN)</h3>
+      <div class="row">
+        <input id="set-token" placeholder="auth token (leave empty if none)" style="flex:1;min-width:200px">
+        <button class="ghost" onclick="saveToken()">Save token</button>
+        <button class="ghost" onclick="clearToken()">Forget</button>
+      </div>
+      <p class="small">Required only if <code>server.auth_token</code> is set in the config. Stored in this browser's localStorage.</p>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const $ = s => document.querySelector(s);
+let TOKEN = localStorage.getItem('aurora_token') || '';
+const authHeaders = () => TOKEN ? {'X-Aurora-Token': TOKEN} : {};
+const api = async (path, opts={}) => {
+  opts.headers = Object.assign({}, opts.headers, authHeaders());
+  const r = await fetch(path, opts);
+  if (r.status === 401) {
+    const t = prompt('This Aurora requires an access token:');
+    if (t) { TOKEN = t.trim(); localStorage.setItem('aurora_token', TOKEN); return api(path, opts); }
+    throw new Error('unauthorized');
+  }
+  if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail || JSON.stringify(e)); }
+  return r.json();
+};
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2600); }
+function saveToken(){ TOKEN = $('#set-token').value.trim(); localStorage.setItem('aurora_token', TOKEN);
+  toast('Token saved' + (TOKEN ? '' : ' (cleared)')); location.reload(); }
+function clearToken(){ TOKEN=''; localStorage.removeItem('aurora_token'); toast('Token forgotten'); location.reload(); }
+const fmtTime = ts => new Date(ts*1000).toLocaleString();
+const fmtDur = s => s<60?`${Math.round(s)}s`: s<3600?`${Math.round(s/60)}min`:`${(s/3600).toFixed(1)}h`;
+
+/* ---- tabs ---- */
+document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#tabs button').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); $('#tab-'+b.dataset.tab).classList.add('active');
+  const loaders = {memory:loadMemory, reminders:loadReminders, persona:loadPersona,
+    proactive:loadProactive, permissions:loadPermissions, people:loadPeople,
+    settings:()=>{ loadSettings(); loadVoices(); }};
+  if (loaders[b.dataset.tab]) loaders[b.dataset.tab]();
+});
+
+/* ---- chat ---- */
+function addMsg(m){
+  const div = document.createElement('div');
+  div.className = 'msg ' + m.role;
+  let src = '';
+  if (m.role==='assistant') src = `<span class="src">${m.source||'chat'}</span>`;
+  if (m.role==='user' && m.sender) src = `<span class="src">${m.sender}</span>`;
+  div.textContent = m.content; div.insertAdjacentHTML('beforeend', src);
+  div.dataset.id = m.id;
+  $('#chatlog').appendChild(div);
+  $('#chatlog').scrollTop = $('#chatlog').scrollHeight;
+}
+async function loadChat(){
+  try{ const h = await api('/api/history?limit=80'); $('#chatlog').innerHTML=''; h.messages.forEach(addMsg);}catch(e){}
+}
+$('#chatbar').onsubmit = async e => {
+  e.preventDefault();
+  const input = $('#chatinput'); const text = input.value.trim();
+  if(!text) return; input.value='';
+  try{ const msg = await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({message:text})}); addMsg(msg); }
+  catch(err){ toast('Error: '+err.message); }
+};
+$('#btn-focus').onclick = async () => { await api('/api/proactive/focus',{method:'POST',
+  headers:{'Content-Type':'application/json'},body:JSON.stringify({minutes:60,enabled:true})});
+  toast('Focus mode on for 60 minutes'); };
+$('#btn-unfocus').onclick = async () => { await api('/api/proactive/focus',{method:'POST',
+  headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:false})});
+  toast('Focus mode off'); };
+
+/* SSE */
+const es = new EventSource('/api/events' + (TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : ''));
+es.onmessage = ev => {
+  try{ const d = JSON.parse(ev.data);
+    if(d.type==='delta'){
+      const last = [...document.querySelectorAll('#chatlog .msg.assistant')].pop();
+      if(last) last.textContent += d.text;
+      $('#chatlog').scrollTop = $('#chatlog').scrollHeight;
+    } else if(d.type==='message'){
+      const existing = document.querySelector(`#chatlog .msg[data-id="${d.message.id}"]`);
+      if(!existing){ addMsg(d.message); if(d.message.role==='assistant'){ loadStatus();
+        if (AUTO_SPEAK && d.message.source !== 'system') speakText(d.message.content); } }
+    } else if(d.type==='reminder_due'){ toast('⏰ Reminder: '+d.text); loadReminders&&loadReminders(); }
+    else if(d.type==='tool'){ toast('tool: '+d.name); }
+  }catch(e){}
+};
+
+/* ---- status ---- */
+let LAST_STATUS = null;
+async function loadStatus(){
+  try{
+    const s = await api('/api/status');
+    LAST_STATUS = s;
+    $('#statusline').textContent =
+      `v${s.version} · model ${s.model||'not set'} ${s.model_reachable===false?'(unreachable)':'· '+s.memory.active+' facts · mood '+s.mood.warmth+'w/'+s.mood.energy+'e'}`;
+    const v = s.voice||{};
+    const parts = [`voice: tts=${v.tts}`];
+    if (v.voice) parts.push(`voice_id=${v.voice}`);
+    if (v.tts_error) parts.push(`tts error: ${v.tts_error}`);
+    parts.push(`stt=${v.stt}`);
+    parts.push(v.stt_available===false ? '(speech-to-text unavailable — voice input disabled)'
+            : v.stt_available===true ? '(ready)' : '');
+    if (v.stt_error) parts.push(`stt error: ${v.stt_error}`);
+    $('#voiceline').textContent = parts.filter(Boolean).join(' ');
+    const mic = $('#btn-mic');
+    // Browsers expose getUserMedia only in a secure context (HTTPS or
+    // localhost) — over plain LAN HTTP the mic button is disabled with a
+    // pointer to the TLS setup, never attempted silently.
+    const secureContext = window.isSecureContext === true && !!navigator.mediaDevices;
+    const micOk = v.permissions && v.permissions.microphone &&
+                  v.stt_available !== false && v.stt !== 'none' && secureContext;
+    mic.disabled = !micOk;
+    mic.title = micOk ? 'Record a voice message (webm/opus) — push-to-talk' :
+      secureContext ? 'Enable the microphone permission (Privacy) with an STT service configured' :
+      'Microphone needs a secure context: serve Aurora over HTTPS (deploy/make-cert.sh, docs/PORTABLE_DEPLOY.md §4b)';
+    const res = s.resources || {};
+    if (res.coordinator && res.coordinator.state === 'busy')
+      $('#statusline').textContent += ' · compute busy (background deferred)';
+  }catch(e){ $('#statusline').textContent='offline'; }
+}
+
+/* ---- memory ---- */
+async function loadMemory(){
+  const view=$('#mem-view').value, q=$('#mem-q').value;
+  const data = await api(`/api/memory/facts?view=${view}&q=${encodeURIComponent(q)}`);
+  const el = $('#mem-list'); el.innerHTML='';
+  for(const f of data.facts){
+    const d = document.createElement('div'); d.className='fact';
+    const badges = [(f.pinned?'<span class="badge pin">pinned</span>':''),
+      (`<span class="badge ${f.source==='manual'||f.source==='user_command'?'man':'auto'}">${f.source}</span>`),
+      (`<span class="badge">${f.category}</span>`),
+      (f.superseded_by?`<span class="badge">superseded → ${f.superseded_by}</span>`:''),
+      (f.archive_reason?`<span class="badge">archived: ${f.archive_reason}</span>`:'')].join('');
+    d.innerHTML = `<div>${f.content}</div>
+      <div class="meta">${badges} w=${f.weight} · updated ${fmtTime(f.updated_at)} · ${f.id}</div>`;
+    const acts = document.createElement('div'); acts.className='row'; acts.style.marginTop='.4rem';
+    const mk = (label, fn, cls='ghost') => { const b=document.createElement('button');
+      b.className=cls; b.textContent=label; b.onclick=fn; acts.appendChild(b); };
+    if(f.active){ mk('Edit', ()=>{ const c=prompt('New content:', f.content); if(c) api(`/api/memory/facts/${f.id}`,
+      {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:c})}).then(loadMemory); });
+      mk(f.pinned?'Unpin':'Pin', ()=>api(`/api/memory/facts/${f.id}`,{method:'PUT',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({pinned:!f.pinned})}).then(loadMemory));
+      mk('Archive', ()=>api(`/api/memory/facts/${f.id}/archive`,{method:'POST'}).then(loadMemory)); }
+    else { mk('Restore', ()=>api(`/api/memory/facts/${f.id}/restore`,{method:'POST'}).then(loadMemory)); }
+    mk('Delete', ()=>{ if(confirm('Permanently delete this fact?')) api(`/api/memory/facts/${f.id}`,
+      {method:'DELETE'}).then(loadMemory); }, 'danger');
+    d.appendChild(acts); el.appendChild(d);
+  }
+  if(!data.facts.length) el.innerHTML='<p class="small">Nothing here yet.</p>';
+  const cl = await api('/api/memory/changelog');
+  $('#mem-changelog').innerHTML = cl.runs.slice(0,6).map(r=>
+    `run @${fmtTime(r.ts)} — merged ${r.merged}, superseded ${r.superseded}, archived ${r.archived}, lessons ${r.lessons}`).join('<br>')
+    || 'no consolidation runs yet';
+}
+async function addFact(){
+  const v = $('#mem-new').value.trim(); if(!v) return;
+  await api('/api/memory/facts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({content:v,source:'manual'})});
+  $('#mem-new').value=''; toast('Fact added'); loadMemory();
+}
+
+/* ---- reminders ---- */
+async function loadReminders(){
+  const data = await api('/api/reminders');
+  const rows = data.reminders.map(r=>{
+    const due = new Date(r.due_at*1000).toLocaleString();
+    const badge = r.status==='waiting_ack'?` <span class="badge">awaiting ack (attempt ${r.attempts})</span>`:
+      r.status==='snoozed'?' <span class="badge">snoozed</span>':
+      r.repeat?' <span class="badge">recurring</span>':'';
+    const btn = (label,action,seconds)=>`<button class="ghost" onclick="remAction('${r.id}','${action}'${seconds?','+seconds:''})">${label}</button>`;
+    return `<tr><td>${r.text}</td><td>${due}${badge}</td><td>${r.project||''}</td>
+      <td>${btn('Done','done')} ${btn('Snooze 10m','snooze',600)} ${btn('Cancel','cancel')}</td></tr>`;
+  }).join('');
+  $('#rem-list').innerHTML = `<table><tr><th>Reminder</th><th>Due</th><th>Project</th><th></th></tr>${rows}</table>`
+    || '<p class="small">None scheduled.</p>';
+  const del = await api('/api/reminders/deliveries');
+  $('#rem-deliveries').innerHTML = del.deliveries.slice(-8).reverse().map(d=>
+    `${fmtTime(d.ts)} — "${d.text}" (attempt ${d.attempts})`).join('<br>') || 'no deliveries yet';
+}
+$('#remform').onsubmit = async e => {
+  e.preventDefault();
+  try{ await api('/api/reminders',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:$('#rem-text').value,when:$('#rem-when').value,
+      follow_up:$('#rem-follow').checked})});
+    $('#rem-text').value=''; $('#rem-when').value=''; $('#rem-follow').checked=false;
+    toast('Reminder scheduled'); loadReminders();
+  }catch(err){ toast('Error: '+err.message); }
+};
+async function remAction(id, action, seconds){
+  await api(`/api/reminders/${id}/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({seconds:seconds||600})});
+  loadReminders();
+}
+
+/* ---- persona ---- */
+async function loadPersona(){
+  const p = await api('/api/persona');
+  const s = p.state;
+  $('#persona-kv').innerHTML = `
+    <div class="k">Name</div><div>${s.name}</div>
+    <div class="k">Version</div><div>${s.version} (evolutions: ${s.evolution_count})</div>
+    <div class="k">Core anchor</div><div>${s.core_anchor||'(extracted on first evolution)'}</div>
+    <div class="k">Last evolved</div><div>${s.evolved_at?fmtTime(s.evolved_at):'never'}</div>`;
+  $('#persona-prompt').value = s.evolved_prompt || s.base_prompt;
+  $('#persona-style').value = s.evolved_style || s.style || '';
+  $('#persona-history').innerHTML = p.history.map(h=>{
+    return `<div class="fact"><div><b>v${h.version}</b> ${fmtTime(h.ts)} ${h.baseline_review?'<span class="badge">baseline review</span>':''}</div>
+      <div class="small">${h.change_summary||h.reason||''}</div></div>`;
+  }).join('') || '<p class="small">No evolutions yet — it happens automatically every '+
+    (p.evolution_config.every_n_user_turns||40)+' user turns.</p>';
+  const m = await api('/api/mood');
+  $('#mood-kv').innerHTML = `
+    <div class="k">Warmth</div><div>${m.warmth}</div>
+    <div class="k">Energy</div><div>${m.energy}</div>
+    <div class="k">Affinity</div><div>${m.affinity} (${m.tier})</div>
+    <div class="k">Grudge</div><div>${m.grudge?'yes':'no'}</div>`;
+}
+async function evolveNow(baseline){
+  $('#evolve-result').textContent = 'running…';
+  try{
+    const r = await api('/api/persona/evolve',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({baseline_review:!!baseline})});
+    $('#evolve-result').textContent = r.fired ? `evolved to v${r.version}: ${r.change_summary}`
+      : `skipped: ${r.skipped_reason}`;
+    loadPersona();
+  }catch(e){ $('#evolve-result').textContent = 'error: '+e.message; }
+}
+async function savePersona(){
+  await api('/api/persona',{method:'PUT',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({prompt:$('#persona-prompt').value,style:$('#persona-style').value})});
+  toast('Persona saved'); loadPersona();
+}
+
+/* ---- proactive ---- */
+async function loadProactive(){
+  const p = await api('/api/proactive');
+  const st = p.state;
+  $('#pro-kv').innerHTML = `
+    <div class="k">Enabled</div><div>${p.enabled}</div>
+    <div class="k">Quiet hours</div><div>${st.focus_enabled?'focus active':`${p.last_decision?'':''}`}</div>
+    <div class="k">Sent today</div><div>${st.day_total||0}</div>
+    <div class="k">No-response streak</div><div>${st.consecutive_no_response||0}</div>`;
+  $('#pro-decision').textContent = p.last_decision ? JSON.stringify(p.last_decision) : '';
+  $('#pro-log').innerHTML = p.log.map(l=>
+    `<div class="fact"><div>${l.text}</div><div class="meta">${l.kind} · urgency ${l.urgency} · ${fmtTime(l.ts)}</div></div>`
+  ).join('') || '<p class="small">No proactive messages yet.</p>';
+}
+async function tickProactive(){
+  const r = await api('/api/proactive/tick',{method:'POST'});
+  toast('tick: '+(r.speak? r.kind : r.reason)); loadProactive();
+}
+
+/* ---- permissions ---- */
+async function loadPermissions(){
+  const perms = await api('/api/permissions');
+  const labels = {microphone:'Microphone (voice input)', camera:'Camera', screen_vision:'Screen vision', voice_output:'Voice output (TTS)'};
+  $('#perm-list').innerHTML = Object.entries(perms).map(([k,v])=>
+    `<label class="switch"><input type="checkbox" data-perm="${k}" ${v?'checked':''}> ${labels[k]||k}</label>`).join('');
+  document.querySelectorAll('[data-perm]').forEach(cb => cb.onchange = async () => {
+    await api('/api/permissions',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:cb.dataset.perm,value:cb.checked})});
+    toast(cb.dataset.perm+' = '+cb.checked); loadStatus();
+  });
+}
+
+/* ---- people ---- */
+async function loadPeople(){
+  const p = await api('/api/people');
+  $('#people-list').innerHTML = p.people.map(x=>
+    `<div class="fact"><b>${x.name}</b> ${x.is_owner?'<span class="badge">owner</span>':''} ${x.pronouns?'<span class="badge">'+x.pronouns+'</span>':''}
+     <span class="badge">${JSON.parse(x.voiceprints||'[]').length} voice prints</span></div>`).join('');
+}
+async function addPerson(){
+  const name = $('#people-name').value.trim(); if(!name) return;
+  await api('/api/people',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name,pronouns:$('#people-pron').value})});
+  $('#people-name').value=''; $('#people-pron').value=''; loadPeople();
+}
+
+/* ---- settings ---- */
+async function loadSettings(){
+  const s = await api('/api/settings');
+  const presetName = s.provider?.chat;
+  const preset = s.provider?.presets?.[presetName] || {};
+  $('#set-base').value = preset.base_url||'';
+  $('#set-model').value = preset.model||'';
+  $('#set-bg').value = s.provider?.background || 'same';
+  $('#settings-kv').innerHTML = `
+    <div class="k">Data dir</div><div>${s.data_dir}</div>
+    <div class="k">User name</div><div>${s.user_name}</div>
+    <div class="k">Extraction cadence</div><div>every ${s.memory?.extraction_every_n_user_turns} user turns</div>
+    <div class="k">Evolution</div><div>every ${s.personality?.evolution?.every_n_user_turns} user turns</div>
+    <div class="k">Consolidation idle</div><div>${s.memory?.consolidation_idle_minutes} min</div>`;
+}
+async function saveModel(){
+  const base = $('#set-base').value.trim(), model = $('#set-model').value.trim();
+  await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({'provider.presets.local.base_url':base,'provider.presets.local.model':model})});
+  toast('Saved — restart to apply');
+}
+async function testProvider(){
+  const r = await api('/api/provider/test',{method:'POST'});
+  $('#set-result').textContent = r.ok ? 'provider reachable ✓' : 'provider unreachable: '+(r.error||'');
+}
+$('#set-bg').onchange = async e => {
+  await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({'provider.background':e.target.value})});
+  toast('Saved — restart to apply');
+};
+
+/* ---- voice in: browser mic → /api/voice/stt (webm/opus, permission-gated) ---- */
+let mediaRecorder = null, audioChunks = [];
+const micBtn = $('#btn-mic');
+async function toggleMic(){
+  if (mediaRecorder && mediaRecorder.state === 'recording'){ mediaRecorder.stop(); return; }
+  if (!navigator.mediaDevices || window.isSecureContext !== true){
+    toast('Microphone needs HTTPS or localhost (secure context) — see docs/PORTABLE_DEPLOY.md §4b');
+    return;
+  }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const mime = window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus' : '';
+    mediaRecorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) audioChunks.push(e.data); };
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      micBtn.classList.remove('rec'); micBtn.textContent = '…';
+      const blob = new Blob(audioChunks, {type: mediaRecorder.mimeType || 'audio/webm'});
+      const fd = new FormData(); fd.append('file', blob, 'speech.webm');
+      try{
+        const r = await api('/api/voice/stt', {method:'POST', body: fd});
+        if (r.text){
+          const input = $('#chatinput');
+          input.value = input.value ? input.value + ' ' + r.text : r.text;
+          input.focus();
+        } else {
+          toast('Transcription unavailable' + (r.error ? ': ' + r.error : ''));
+        }
+      }catch(err){ toast('STT error: ' + err.message); }
+      micBtn.textContent = '🎤';
+    };
+    mediaRecorder.start();
+    micBtn.classList.add('rec'); micBtn.textContent = '⏹ Stop';
+  }catch(e){ toast('Microphone unavailable: ' + e.message); }
+}
+micBtn.onclick = toggleMic;
+
+/* ---- voice out: /api/voice/tts playback (permission-gated server-side) ---- */
+let AUTO_SPEAK = localStorage.getItem('aurora_auto_speak') === '1';
+$('#cb-autospeak').checked = AUTO_SPEAK;
+$('#cb-autospeak').onchange = e => {
+  AUTO_SPEAK = e.target.checked;
+  localStorage.setItem('aurora_auto_speak', AUTO_SPEAK ? '1' : '0');
+};
+let audioQueue = [], playing = false;
+function playQueue(){
+  if (playing || !audioQueue.length) return;
+  playing = true;
+  const blob = audioQueue.shift();
+  const audio = new Audio(URL.createObjectURL(blob));
+  audio.onended = () => { URL.revokeObjectURL(audio.src); playing = false; playQueue(); };
+  audio.onerror = () => { URL.revokeObjectURL(audio.src); playing = false; playQueue(); };
+  audio.play().catch(() => { playing = false; });
+}
+async function speakText(text, voice){
+  if (!text || !text.trim()) return;
+  try{
+    const q = new URLSearchParams({text: text.slice(0, 1000)});
+    if (voice) q.set('voice', voice);
+    const r = await fetch('/api/voice/tts?' + q.toString(), {headers: authHeaders()});
+    if (!r.ok){
+      const e = await r.json().catch(() => ({}));
+      toast('Voice unavailable' + (e.error ? ': ' + e.error : ` (HTTP ${r.status})`));
+      return;
+    }
+    audioQueue.push(await r.blob()); playQueue();
+  }catch(e){ toast('TTS error: ' + e.message); }
+}
+$('#btn-speak-last').onclick = () => {
+  const last = [...document.querySelectorAll('#chatlog .msg.assistant')].pop();
+  if (last) speakText(last.textContent);
+};
+
+/* ---- settings: voice picker + token ---- */
+async function loadVoices(force){
+  try{
+    const data = await api('/api/voice/voices' + (force ? '?refresh=1' : ''));
+    const sel = $('#set-voice');
+    sel.innerHTML = '';
+    const opts = data.voices && data.voices.length ? data.voices : [''];
+    for (const v of opts){
+      const o = document.createElement('option');
+      o.value = v; o.textContent = v || '(no voices discovered)';
+      sel.appendChild(o);
+    }
+    sel.value = data.selected || '';
+    if (data.selected && !opts.includes(data.selected)){
+      const o = document.createElement('option');
+      o.value = data.selected; o.textContent = data.selected + ' (saved; adapter list unavailable)';
+      sel.appendChild(o); sel.value = data.selected;
+    }
+    $('#voice-info').textContent =
+      `adapter: ${data.tts} · ${data.voices.length} voice(s) discovered` +
+      (data.error ? ` · ${data.error}` : '') +
+      (data.selected ? ` · using "${data.selected}"` : ' · no selection yet');
+  }catch(e){
+    $('#voice-info').textContent = 'voice discovery failed: ' + e.message;
+  }
+}
+$('#set-voice').onchange = async e => {
+  try{
+    await api('/api/voice/voice', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({voice: e.target.value})});
+    toast('Voice set to ' + e.target.value); loadStatus();
+  }catch(err){ toast('Voice not saved: ' + err.message); loadVoices(true); }
+};
+async function testVoice(){
+  const v = $('#set-voice').value;
+  speakText('Voice check. Aurora is ready.', v || undefined);
+}
+
+loadChat(); loadStatus();
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>

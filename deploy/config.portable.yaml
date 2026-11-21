@@ -1,0 +1,84 @@
+# Aurora configuration for kayock-Ubuntu-Portable (10.0.0.45).
+# Install target: /etc/aurora/config.yaml (systemd unit points there).
+#
+# Principles:
+#   * Aurora only CALLS the existing Kayock services; it never configures
+#    , restarts or unloads them.
+#   * No model is reserved: the chat model lives in whatever server you
+#     already run on Portable and is loaded on demand by that server.
+#   * Aurora binds the LAN only behind the auth token. Never port-forward.
+
+data_dir: /var/lib/aurora            # all state: aurora.db (one file to back up)
+host: 0.0.0.0                        # reachable from the LAN (see server.auth_token)
+port: 8795                           # CHECK: must be free on Portable (install.sh verifies)
+user_name: "Eric"
+
+# ---------------------------------------------------------------- model
+# Point this at the model server you already run on Portable. Aurora makes
+# short request bursts and leaves the model management to that server.
+provider:
+  chat: local
+  background: same                   # a small local model is fine for extraction/consolidation
+  presets:
+    local:
+      type: openai_compat
+      base_url: http://127.0.0.1:1234/v1   # LM Studio; llama.cpp: http://127.0.0.1:8080/v1
+      model: local-model                   # the id your server reports on /v1/models
+      api_key: ""
+      temperature: 0.8
+      max_tokens: 1024
+
+# ---------------------------------------------------------------- voice
+voice:
+  tts: kayock                         # kayock-openai-speech-adapter (8768)
+  stt: kayock                         # kayock-craft-stt (faster-whisper, 8769)
+  kayock_tts_url: http://10.0.0.45:8768/v1
+  kayock_tts_api_key: ""              # existing local interface needs none
+  kayock_tts_model: kokoro            # the "model" field; adjust if the adapter expects another
+  kayock_stt_url: http://127.0.0.1:8769/v1   # same host — localhost avoids LAN dependency
+  kayock_stt_api_key: ""
+  kayock_stt_model: base.en           # matches the existing lazy-loaded whisper service
+  voice_id: am_adam                   # initial choice; pick live in the dashboard —
+                                      # ids are discovered from GET /v1/models at runtime
+  format: mp3                         # mp3 | wav (both supported by the adapter)
+  auto_speak: false                   # dashboard "speak replies" toggle plays audio client-side
+  stt_language: ""                    # empty = service default (base.en is English)
+
+# ------------------------------------------------------------ resources
+# Aurora stays lightweight: no model reserved, background AI deferred when
+# compute is needed elsewhere. Enable the traffic-light probe ONLY after
+# verifying its protocol on Portable (deploy/verify-voice.sh prints the
+# endpoints). Aurora only ever sends GET requests to it.
+resources:
+  traffic_light_url: ""               # e.g. http://127.0.0.1:8791 — enable after verification
+  probe_seconds: 30
+  busy_markers: [busy, occupied, loading, inferencing]
+  background_enabled: true            # false = never run extraction/evolution/proactive AI
+  model_health_ttl_seconds: 60
+  foreground_grace_seconds: 120
+
+# ---------------------------------------------------------------- access
+server:
+  # LAN browsers must present this token (Authorization: Bearer …).
+  # Generate: openssl rand -hex 32
+  auth_token: "CHANGE_ME_openssl_rand_hex_32"
+  # HTTPS for secure-context push-to-talk from other LAN machines (browsers
+  # only grant microphone access on HTTPS or localhost). Generate the local
+  # self-signed certificate with `sudo deploy/make-cert.sh` (or install with
+  # `sudo ./deploy/install.sh --tls`), then uncomment:
+  # tls_cert: /etc/aurora/tls/aurora.crt
+  # tls_key: /etc/aurora/tls/aurora.key
+
+# ------------------------------------------------------------ memory etc.
+memory:
+  extraction_every_n_user_turns: 4
+  consolidation_idle_minutes: 15
+
+proactive:
+  enabled: true
+  quiet_start: "23:00"
+  quiet_end: "07:30"
+
+personality:
+  evolution:
+    every_n_user_turns: 40
