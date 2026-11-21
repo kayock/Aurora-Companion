@@ -29,19 +29,62 @@ async def test_basic_turn_persists_and_broadcasts(make_app):
 async def test_tool_loop_set_reminder(make_app):
     rules = [
         (r"\[tool set_reminder result\]", "Done!"),
-        (r"remind me to check the bread",
+        (r"put bread on the shopping list",
          ChatResult(text="", finish_reason="tool_calls",
                     tool_calls=[ToolCall(name="set_reminder",
                                          arguments=json.dumps({"text": "Check the bread", "when": "in 20 minutes"}))])),
         (r"warmth", "warmth 1 energy ="),
     ]
     app, mock = make_app(rules=rules, overrides={"reminders.follow_up_default_seconds": 300})
-    msg = await app.conversation.submit_user_message("Remind me to check the bread in 20 minutes")
+    # phrasing that the deterministic NL parser does not claim → model + tool
+    msg = await app.conversation.submit_user_message("Put bread on the shopping list, in 20 minutes please")
     rems = app.reminders.list(active_only=True)
     assert len(rems) == 1
     assert rems[0].text == "Check the bread"
     assert rems[0].source == "assistant_tool"
     # the model received the tool result and produced the final text
+    assert any("tool set_reminder result" in c["user"] for c in mock.calls)
+
+
+async def test_nl_reminder_is_executed_model_free(make_app):
+    """'Remind me to check the servers in 15 minutes' must reliably create the
+    reminder WITHOUT the model — the deterministic path executes even when the
+    model is down or answers with tool-call JSON text."""
+    app, mock = make_app(rules=[], overrides={})
+    msg = await app.conversation.submit_user_message("Remind me to check the servers in 15 minutes")
+    rems = app.reminders.list(active_only=True)
+    assert len(rems) == 1
+    rem = rems[0]
+    assert "check the servers" in rem.text.lower()
+    assert rem.source == "user" and rem.kind == ""
+    assert 14 * 60 < rem.due_at - rem.created_at <= 16 * 60
+    assert mock.calls == []  # the model was never involved
+    assert "remind you" in msg["content"].lower()
+
+
+async def test_nl_timer_creates_timer_kind(make_app):
+    app, mock = make_app(rules=[], overrides={})
+    msg = await app.conversation.submit_user_message("Set a timer for 5 minutes")
+    rems = app.reminders.list(active_only=True)
+    assert len(rems) == 1 and rems[0].kind == "timer"
+    assert 4.5 * 60 < rems[0].due_at - rems[0].created_at <= 5.5 * 60
+    assert mock.calls == []
+    assert "timer set" in msg["content"].lower()
+
+
+async def test_model_replying_with_tool_json_text_still_executes(make_app):
+    """A model that leaks the tool call as plain JSON text in `content` must
+    have that call EXECUTED — the JSON must never surface in the chat."""
+    rules = [
+        (r"\[tool set_reminder result\]", "Done, I set the reminder!"),
+        (r"water the plants",
+         '{"name": "set_reminder", "arguments": {"text": "Water the plants", "when": "in 10 minutes"}}'),
+    ]
+    app, mock = make_app(rules=rules, overrides={})
+    msg = await app.conversation.submit_user_message("I need to water the plants soon")
+    rems = app.reminders.list(active_only=True)
+    assert len(rems) == 1 and rems[0].source == "assistant_tool"
+    assert '"name"' not in msg["content"] and "set_reminder" not in msg["content"]
     assert any("tool set_reminder result" in c["user"] for c in mock.calls)
 
 

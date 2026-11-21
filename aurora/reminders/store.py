@@ -15,12 +15,20 @@ follow-up semantics neither upstream had together.)
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from ..clock import Clock
 from ..storage import Database
 from ..timeparse import next_occurrence, too_frequent
 from ..util import new_id
+
+# greetings / test noise that must never become a stored reminder (the user
+# observed "hi"-named rows created in a live run — blocked at the source now)
+_TRIVIAL_TEXT_RE = re.compile(
+    r"^(h+i+|hello+|hey+|yo+|ok(?:ay)?|yes+|no+|thanks?|thank you|test(?: reminder|ing)?"
+    r"|asdf+|qwerty+|null|undefined|none|nan|\.+)[\s!.?,:;~-]*$",
+    re.I)
 
 STATUS_SCHEDULED = "scheduled"
 STATUS_DELIVERED = "delivered"
@@ -50,6 +58,8 @@ class Reminder:
     project: str = ""
     person: str = "owner"
     source: str = "user"
+    kind: str = ""  # "" | "timer" — timers get the repeat/snooze/dismiss flow
+    duration: int | None = None  # intended timer length in seconds (timers only)
 
     def to_dict(self) -> dict:
         return {
@@ -59,6 +69,7 @@ class Reminder:
             "attempts": self.attempts, "snooze_count": self.snooze_count,
             "last_fired": self.last_fired, "snoozed_until": self.snoozed_until,
             "project": self.project, "person": self.person, "source": self.source,
+            "kind": self.kind, "duration": self.duration,
         }
 
     @property
@@ -67,6 +78,9 @@ class Reminder:
 
 
 def _row_to_reminder(row) -> Reminder:
+    keys = row.keys()
+    kind = row["kind"] if "kind" in keys else ""
+    duration = row["duration"] if "duration" in keys else None
     return Reminder(
         id=row["id"], text=row["text"], due_at=row["due_at"], created_at=row["created_at"],
         repeat=json.loads(row["repeat"]) if row["repeat"] else None,
@@ -74,7 +88,7 @@ def _row_to_reminder(row) -> Reminder:
         status=row["status"], ack=bool(row["ack"]), attempts=row["attempts"],
         snooze_count=row["snooze_count"], last_fired=row["last_fired"],
         snoozed_until=row["snoozed_until"], project=row["project"],
-        person=row["person"], source=row["source"],
+        person=row["person"], source=row["source"], kind=kind, duration=duration,
     )
 
 
@@ -99,7 +113,18 @@ class ReminderStore:
         project: str = "",
         person: str = "owner",
         source: str = "user",
+        kind: str = "",
+        duration: int | None = None,
     ) -> Reminder:
+        # single validation choke point: every creation path (dashboard form,
+        # API, chat fast-path, model tool) flows through here, so junk never
+        # reaches the store — no "hi"/"null"/blank reminder rows, ever.
+        text = str(text or "").strip()
+        project = str(project or "").strip()
+        if len(text) < 2 or _TRIVIAL_TEXT_RE.match(text):
+            raise ValueError(
+                f"\"{text}\" is not an actionable reminder text — say what "
+                "should be remembered, e.g. 'check the servers'")
         text = (text or "").strip()
         if not text:
             raise ValueError("reminder text is required")
@@ -117,11 +142,12 @@ class ReminderStore:
         rem_id = new_id("r")
         self.db.execute(
             """INSERT INTO reminders (id, text, due_at, created_at, repeat, follow_up, status,
-                project, person, source) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                project, person, source, kind, duration) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (rem_id, text, float(due_at), now,
              json.dumps(repeat, ensure_ascii=False) if repeat else None,
              json.dumps(follow_up_spec, ensure_ascii=False) if follow_up_spec else None,
-             STATUS_SCHEDULED, project, person, source),
+             STATUS_SCHEDULED, project, person, source, kind,
+             int(duration) if duration else None),
         )
         return self.get(rem_id)
 
@@ -233,6 +259,21 @@ class ReminderStore:
     def snooze(self, rem_id: str, seconds: int) -> Reminder | None:
         rem = self.get(rem_id)
         if rem is None or rem.status not in ACTIVE_STATUSES:
+            return None
+        now = self.clock.now()
+        self._update(
+            rem_id, status=STATUS_SNOOZED, due_at=now + seconds,
+            snoozed_until=now + seconds, snooze_count=rem.snooze_count + 1,
+        )
+        return self.get(rem_id)
+
+    def bring_back(self, rem_id: str, seconds: int) -> Reminder | None:
+        """Timer snooze flow: bring a finished one-shot back into the future.
+        Unlike plain snooze() this also works from `delivered` — a fired timer
+        is delivered until the user answers — but never resurrects anything
+        the user dismissed or that was cancelled."""
+        rem = self.get(rem_id)
+        if rem is None or rem.status in (STATUS_DONE, STATUS_CANCELLED, STATUS_MISSED):
             return None
         now = self.clock.now()
         self._update(

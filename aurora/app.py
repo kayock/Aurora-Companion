@@ -40,6 +40,7 @@ from .reminders.store import ReminderStore
 from .resources import ComputeGuard, ResourceCoordinator
 from .senses import ScreenSense
 from .storage import Database
+from .updater import Updater
 from .voice.kayock import KayockSTT, KayockTTS
 from .voice.service import VoiceService
 from .voice.stt import WhisperSTT
@@ -142,6 +143,17 @@ class CompanionApp:
         )
         self.reminder_scheduler.on_due = self.conversation.deliver_reminder
 
+        # self-update (opt-in, user-approved; repo configured under update.*)
+        self.updater = Updater(
+            config.get("update", {}), self.db,
+            app_dir=Path(__file__).resolve().parents[1],
+            data_dir=self.data_dir, config_path=config.path,
+            version=__version__, clock=self.clock,
+        )
+        # software-state awareness: Aurora can talk naturally about her
+        # version, a pending update, and how her last upgrade went
+        self.conversation.software_state_fn = self._software_state_text
+
         # proactive
         self.proactive = ProactiveScheduler(
             self.db, self.clock, self.chat_provider, self.store, self.mood,
@@ -184,9 +196,15 @@ class CompanionApp:
         # Client-driven playback is the default; the server-side hook exists
         # for API-only setups and must be explicitly enabled to avoid double
         # synthesis on the host.
+        # Server-side synthesis hook: chat auto-speak, or notification voice
+        # announcements — each explicitly enabled (client playback is the
+        # default; this avoids double synthesis on the host).
+        speak_for_chat = (config.get("voice.auto_speak", False)
+                          and config.get("voice.server_speak", False))
+        speak_for_alerts = (config.get("notifications.voice_announce", False)
+                            and config.get("voice.server_speak", False))
         self.conversation._voice = self.voice \
-            if config.get("voice.auto_speak", False) and config.get("voice.server_speak", False) \
-            else None
+            if (speak_for_chat or speak_for_alerts) else None
         self.senses = ScreenSense(self.permissions)
 
         self._started = False
@@ -201,6 +219,37 @@ class CompanionApp:
             self.proactive.start()
         if self.config.get("memory.enabled", True):
             self.consolidator.start()
+        # if an update was just installed, verify it and say so (update
+        # awareness — one visible message, tied to the update event only)
+        announcement = self.updater.verify_after_restart()
+        if announcement:
+            await self.conversation._finish_system_reply(
+                announcement, "owner", source="update")
+
+    def _software_state_text(self) -> str:
+        """Short prompt block for update awareness — only when there is
+        something worth saying (update available, or a recent upgrade)."""
+        state = self.updater.public_state()
+        parts = []
+        if state.get("update_available"):
+            parts.append(f"A software update for you (Aurora) is available: "
+                         f"version {state.get('latest_version')} is released, you are "
+                         f"running {state['version']}. Installing is the user's choice — "
+                         "you may mention it naturally but must not nag.")
+        if state.get("last"):
+            last = state["last"]
+            if last.get("result") == "ok":
+                parts.append(f"Your last software update (to {last.get('to')}) "
+                             "succeeded and everything carried over.")
+            elif last.get("result") == "failed":
+                parts.append("Your last software update did not complete; offer "
+                             "a rollback.")
+        if not parts:
+            return ""
+        return ("[Software state]\n" + "\n".join(parts)
+                + f"\nCurrent version: {state['version']}."
+                + (f" Recent capabilities gained: {state['last'].get('notes', '')[:300]}"
+                   if state.get("last") else ""))
 
     async def stop(self) -> None:
         self._started = False
@@ -244,4 +293,10 @@ class CompanionApp:
                 "guard": self.guard.snapshot(),
                 "last_deferral": self.db.get_meta_json("resources.last_deferral", None),
             },
+            "notifications": {
+                "chime": self.config.get("notifications.chime", True),
+                "voice_announce": self.config.get("notifications.voice_announce", False),
+            },
+            "update": self.updater.public_state(),
+            "pending_timers": dict(self.conversation.pending_timers),
         }

@@ -43,7 +43,7 @@ from ..providers import parse_tool_arguments
 from ..reminders.scheduler import ReminderScheduler
 from ..reminders.store import Reminder, ReminderStore
 from ..storage import Database
-from ..timeparse import parse_repeat, parse_when, describe_repeat
+from ..timeparse import describe_repeat, friendly, parse_repeat, parse_when
 from .prompt import PromptBuilder
 from .tools import ToolRegistry
 
@@ -52,6 +52,33 @@ from .tools import ToolRegistry
 REMEMBER_RE = re.compile(
     r"^(?:ok,?\s*|hey,?\s*|please\s+)*(remember|don'?t forget|keep in mind)\b(?:\s+(?:that|this))?[,: ]+(.{3,200})",
     re.I)
+
+# Natural-language reminders and timers ("Remind me to check the servers in
+# 15 minutes.", "Set a timer for 5 minutes."). Handled deterministically,
+# model-free, so the request always executes — even when the model is down
+# or answers with tool-call JSON instead of calling its tools.
+REMIND_NL_RE = re.compile(r"^remind me (?:to |about |that |)?(.{3,200})$", re.I)
+TIMER_NL_RE = re.compile(r"^(?:set|start)(?: a| an| the)? timer (?:for |to |on |about )?(.{1,200})$", re.I)
+# label/time split: the tail is either a when-keyword phrase ("in 15 minutes",
+# "tomorrow at 9am") or a bare duration ("…, 15 minutes", "… for 90 seconds").
+# The head may be short ("hi" → rejected as trivial by the store, never stored).
+_WHEN_KEYWORD_TAIL = r"(?:in|after|at|every|on|next|tomorrow|each)\b.+"
+_WHEN_BARE_TAIL = (
+    r"\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?)"
+    r"(?:\s*(?:,\s*|\band\s+)?\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?))*"
+    r"|a\s+few\s+(?:seconds?|minutes?|mins?|hours?|days?)"
+    r"|a\s+couple\s+of\s+(?:minutes?|mins?|hours?|days?)")
+WHEN_TAIL_RE = re.compile(
+    rf"^(.{{1,180}}?)[\s,;]+((?:{_WHEN_KEYWORD_TAIL})|(?:{_WHEN_BARE_TAIL}))$",
+    re.I)
+# Timer follow-up answers: "Repeat", "Five more minutes", "Dismiss", ...
+TIMER_DECISION_RE = re.compile(
+    r"^(?:ok,?\s*|well,?\s*)?(?:please\s+)?"
+    r"(repeat(?: it)?|again|restart(?: it)?|go again|yes(?: please)?|sure|"
+    r"(five|ten|fifteen|twenty|thirty|\d+)\s*more\s*minutes?|snooze(?: (?:it|for)?)?(?:\s+(\d+)\s*minutes?)?|"
+    r"(\d+)\s*minutes?|dismiss(?: it)?|stop(?: it)?|cancel(?: it)?|done|no thanks|never mind|thanks)[.!]?$",
+    re.I)
+WORD_MINUTES = {"five": 5, "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30}
 
 
 class ConversationManager:
@@ -100,6 +127,16 @@ class ConversationManager:
         self._proactive_cb = None
         self._voice = None  # set by the app when voice is enabled
         self._streaming = False
+        # Timer interaction state: pending "Your timer is up — repeat it?"
+        # decisions keyed by reminder id. Persisted in the store so a pending
+        # question survives a restart; the prompt is asked exactly once per
+        # fire (never repeated on a loop).
+        self.pending_timers: dict[str, dict] = dict(
+            self.db.get_meta_json("timers.pending", {}))
+        # Optional software-state provider (wired by the app; keeps this
+        # module decoupled from the updater). Returns a short prompt block
+        # describing version / update availability / recent upgrade history.
+        self.software_state_fn: Any = None
         # Resource-awareness: when a ComputeGuard is wired, nonessential
         # background AI (mood appraisal, extraction, evolution, summary)
         # is deferred while the model is busy/unloaded/unreachable or the
@@ -228,6 +265,21 @@ class ConversationManager:
             reply = self._handle_command(text)
             return await self._finish_system_reply(reply, person, source="chat")
 
+        # timer follow-up answers ("repeat", "five more minutes", "dismiss")
+        # are matched first — they only count while a decision is pending
+        decision = await self._try_timer_decision(text)
+        if decision is not None:
+            return await self._finish_system_reply(decision, person, source="timer")
+
+        # natural-language reminders/timers — deterministic, model-free, so
+        # they execute reliably even with no model or a JSON-happy model
+        try:
+            nl = await self._try_parse_reminder_request(text, person)
+        except ValueError:
+            nl = None  # trivial text (e.g. "hi") — not a reminder; model's turn
+        if nl is not None:
+            return await self._finish_system_reply(nl, person, source="reminder_set")
+
         # explicit "remember this" → immediate durable fact
         m = REMEMBER_RE.search(text)
         if m and self.config.get("memory.enabled", True):
@@ -330,6 +382,9 @@ class ConversationManager:
         )
         if self.tools.names():
             system += "\n\n" + self.tools.manifest_text()
+        state = self._software_state_text()
+        if state:
+            system += "\n\n" + state
         messages = [{"role": "system", "content": system}]
         summary_until = int(self.db.get_meta("conversation.summary_until_id") or 0)
         window = [m for m in self._window() if m["id"] > summary_until]
@@ -340,6 +395,18 @@ class ConversationManager:
         if include_user_text and text and (not window or window[-1]["content"] != text):
             messages.append({"role": "user", "content": text})
         return messages
+
+    def _software_state_text(self) -> str:
+        """Operational software awareness (Phase: update awareness). The app
+        wires a provider that describes version / update availability / the
+        result of the last upgrade, so Aurora can talk about her own state
+        naturally. Empty unless there is something worth saying."""
+        if self.software_state_fn is None:
+            return ""
+        try:
+            return str(self.software_state_fn() or "")
+        except Exception:
+            return ""
 
     async def _generate_reply(self, text: str, person: str, prefix: str = "",
                               proactive_context: str | None = None) -> str:
@@ -365,6 +432,23 @@ class ConversationManager:
                     else:
                         raise
                 if not result.tool_calls:
+                    # Some models answer with the tool call as plain JSON text
+                    # instead of using the tool_calls field. Detect that shape
+                    # and EXECUTE it — a reminder request must actually run,
+                    # never surface as JSON in the conversation.
+                    embedded = self._extract_embedded_tool_call(result.text) if specs else None
+                    if embedded is not None:
+                        name, raw_args = embedded
+                        args = parse_tool_arguments(raw_args)
+                        output = await self.tools.call(name, args,
+                                                       {"person": person, "tz_offset_minutes": 0})
+                        await self._emit({"type": "tool", "name": name, "arguments": args,
+                                          "output": output, "recovered_from_text": True})
+                        messages.append({"role": "assistant", "content": result.text})
+                        messages.append({"role": "user",
+                                         "content": f"[tool {name} result]\n{output}"})
+                        text = "continue with the tool results"
+                        continue
                     return prefix + self._clean(result.text)
                 messages.append({"role": "assistant", "content": result.text,
                                  "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in result.tool_calls]})
@@ -380,6 +464,30 @@ class ConversationManager:
             return prefix + self._clean(result.text)
         finally:
             self._streaming = False
+
+    @staticmethod
+    def _extract_embedded_tool_call(text: str) -> "tuple[str, Any] | None":
+        """Find a tool call that a model emitted as plain text, e.g.
+        '{"name": "set_reminder", "arguments": {...}}' (with or without a
+        ```json fence). Returns (name, raw_arguments) when the name matches a
+        registered tool, else None."""
+        raw = (text or "").strip()
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I).strip()
+        if not raw.startswith("{") or not raw.endswith("}"):
+            return None
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        name = data.get("name") or data.get("tool") or data.get("tool_name")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        raw_args = data.get("arguments", data.get("parameters", {}))
+        if not isinstance(raw_args, str):  # parse_tool_arguments expects JSON text
+            raw_args = json.dumps(raw_args)
+        return name.strip(), raw_args
 
     @staticmethod
     def _clean(text: str) -> str:
@@ -406,17 +514,24 @@ class ConversationManager:
         await self._emit({"type": "message", "message": msg})
         asyncio.ensure_future(self._post_turn(text, person, user_msg_id))
         if self._voice is not None:
-            asyncio.ensure_future(self._voice.speak(text))
+            # awaited so the utterance actually happens with the turn (and is
+            # observable); speak failures never break the visible reply
+            try:
+                await self._voice.speak(text)
+            except Exception:
+                pass
         return msg
 
-    async def _finish_system_reply(self, text: str, person: str, source: str) -> dict:
+    async def _finish_system_reply(self, text: str, person: str, source: str,
+                                   meta: dict | None = None) -> dict:
         now = self.clock.now()
+        meta = dict(meta or {})
         cur = self.db.execute(
-            "INSERT INTO messages (role, content, ts, person, source) VALUES (?,?,?,?,?)",
-            ("assistant", text, now, person, source),
+            "INSERT INTO messages (role, content, ts, person, source, meta) VALUES (?,?,?,?,?,?)",
+            ("assistant", text, now, person, source, json.dumps(meta)),
         )
         msg = {"id": cur.lastrowid, "role": "assistant", "content": text, "ts": now,
-               "person": person, "sender": "", "source": source, "meta": {}}
+               "person": person, "sender": "", "source": source, "meta": meta}
         await self._emit({"type": "message", "message": msg})
         return msg
 
@@ -470,10 +585,184 @@ class ConversationManager:
         except Exception:
             pass  # post-turn hooks must never break the visible reply
 
+    # ------------------------------------------------------------------ notifications, timers
+    async def _announce(self, text: str) -> None:
+        """Speak a notification through the wired voice service (one-shot).
+        Awaited by the delivery paths so the utterance actually happens
+        before the turn ends (and is observable in tests)."""
+        if self._voice is not None:
+            try:
+                await self._voice.speak(text)
+            except Exception:
+                pass  # voice is an enhancement — never break the delivery
+
+    def _persist_pending_timers(self) -> None:
+        self.db.set_meta_json("timers.pending", self.pending_timers)
+
+    def _register_pending_timer(self, timer: Reminder, duration: int | None) -> None:
+        prev = self.pending_timers.get(timer.id)
+        # a snoozed timer re-fires with a shifted due_at — keep the ORIGINAL
+        # duration so "repeat" restarts the real length, not the snooze span
+        keep_duration = prev["duration"] if (prev and prev.get("duration")) else duration
+        self.pending_timers[timer.id] = {
+            "text": timer.text, "duration": keep_duration,
+            "fired_at": self.clock.now(), "person": timer.person,
+        }
+        self._persist_pending_timers()
+
+    def _clear_pending_timer(self, timer_id: str) -> None:
+        if self.pending_timers.pop(timer_id, None) is not None:
+            self._persist_pending_timers()
+
+    def _most_recent_pending_timer(self) -> str | None:
+        if not self.pending_timers:
+            return None
+        return max(self.pending_timers, key=lambda k: self.pending_timers[k].get("fired_at", 0))
+
+    def _timer_duration_hint(self, timer: Reminder) -> int | None:
+        if timer.duration:
+            return int(timer.duration)  # exact intended length, recorded at creation
+        span = timer.due_at - timer.created_at
+        return int(span) if 1 <= span <= 30 * 86400 else None
+
+    def alerts(self) -> dict:
+        """Notification-bell payload: active reminders (upcoming, snoozed,
+        waiting for ack) plus timers awaiting a repeat/snooze/dismiss answer."""
+        active = self.reminders.list(active_only=True)
+        return {
+            "active": [r.to_dict() for r in active],
+            "pending_timers": dict(self.pending_timers),
+            "count": len(active) + len(self.pending_timers),
+        }
+
+    async def _try_parse_reminder_request(self, text: str, person: str) -> str | None:
+        """Deterministic NL reminders/timers ("remind me to X in 15 minutes",
+        "set a timer for 5 minutes"). Returns a confirmation reply, or None
+        when the text is not a plainly parseable request (the model still
+        gets its turn). Never needs the model — it must execute reliably."""
+        kind = ""
+        m = REMIND_NL_RE.match(text)
+        if m is None:
+            m = TIMER_NL_RE.match(text)
+            kind = "timer"
+        if m is None:
+            return None
+        payload = m.group(1).strip()
+        now = self.clock.now()
+        label, when_text = payload, payload
+        tail = WHEN_TAIL_RE.match(payload)
+        if tail is not None:
+            label, when_text = tail.group(1).strip(), tail.group(2).strip()
+            label = re.sub(r"\s+(?:for|in|at|on|after|every|and)$", "", label, flags=re.I)
+        due = parse_when(when_text, now)
+        if due is None and kind == "timer" and tail is None:
+            # "set a timer for 5 minutes" — a bare duration is a timer length
+            due = parse_when(f"in {when_text}", now)
+        if due is None or due <= now - 5:
+            return None  # not a parseable time → let the model handle it
+        repeat = parse_repeat(when_text)
+        if kind == "timer" and repeat:
+            return None  # "a timer every day" is a recurring reminder
+        if kind == "timer" and not tail:
+            label = f"Timer ({when_text})"  # bare duration → generic label
+        rem = self.reminders.add(label, due, repeat=repeat, person=person,
+                                 source="user", kind=kind,
+                                 duration=int(round(due - now)) if kind == "timer" else None)
+        rep = f", repeating {describe_repeat(repeat)}" if repeat else ""
+        if kind == "timer":
+            return f"Timer set — {friendly(rem.due_at, now)}{rep}."
+        return f"Got it — I'll remind you to {label.rstrip('.')} {friendly(rem.due_at, now)}{rep}."
+
+    async def _try_timer_decision(self, text: str) -> str | None:
+        """Model-free follow-up answers to a fired timer ("Repeat", "Five
+        more minutes", "Dismiss"). Targets the most recently fired pending
+        timer; several pending timers keep their own buttons in the UI."""
+        if not self.pending_timers:
+            return None
+        m = TIMER_DECISION_RE.match(text.strip())
+        if m is None:
+            return None
+        token = (m.group(1) or "").lower().strip()
+        target = self._most_recent_pending_timer()
+        if target is None:
+            return None
+        info = self.pending_timers.get(target, {})
+        person = info.get("person", "owner")
+
+        if token.startswith(("dismiss", "stop", "cancel", "done", "no thanks", "never mind")):
+            result = await self.timer_dismiss(target, person)
+            return "Dismissed." if result.get("ok") else None
+        if (token in ("again", "go again", "yes", "yes please", "sure")
+                or token.startswith("repeat") or token.startswith("restart")):
+            result = await self.timer_repeat(target, person)
+            return result["message"] if result.get("ok") else None
+        mm = re.search(r"(\d+|five|ten|fifteen|twenty|thirty)\s*(?:more\s*)?minutes?", token)
+        if mm is not None:
+            word = mm.group(1)
+            minutes = WORD_MINUTES.get(word) if not word.isdigit() else int(word)
+            result = await self.timer_snooze(target, (minutes or 5) * 60, person)
+            return result["message"] if result.get("ok") else None
+        if token.startswith("snooze"):
+            result = await self.timer_snooze(target, 300, person)
+            return result["message"] if result.get("ok") else None
+        return None  # matched something ambiguous → let the model answer
+
+    async def timer_repeat(self, timer_id: str, person: str | None = None) -> dict:
+        """Restart a completed timer with its original duration. Never runs
+        automatically — only on the user's word or button."""
+        info = self.pending_timers.get(timer_id)
+        if info is None:
+            return {"ok": False, "error": "no pending timer decision for that id"}
+        duration = int(info.get("duration") or 300)
+        now = self.clock.now()
+        person = person or info.get("person", "owner")
+        rem = self.reminders.add(info.get("text") or "Timer", now + duration,
+                                 person=person, source="user", kind="timer",
+                                 duration=duration)
+        self._clear_pending_timer(timer_id)
+        await self._emit({"type": "timers_changed"})
+        message = f"Timer restarted — {friendly(rem.due_at, now)}."
+        await self._finish_system_reply(message, person, source="timer")
+        return {"ok": True, "reminder": rem.to_dict(), "message": message}
+
+    async def timer_snooze(self, timer_id: str, seconds: int, person: str | None = None) -> dict:
+        """Bring a fired timer back after `seconds` (original duration kept
+        for a later repeat)."""
+        info = self.pending_timers.get(timer_id)
+        if info is None:
+            return {"ok": False, "error": "no pending timer decision for that id"}
+        seconds = max(30, min(int(seconds), 86400))
+        rem = self.reminders.bring_back(timer_id, seconds)
+        if rem is None:
+            return {"ok": False, "error": "reminder not found"}
+        info["fired_at"] = self.clock.now()  # stays most-recent for voice answers
+        self._persist_pending_timers()
+        await self._emit({"type": "timers_changed"})
+        person = person or info.get("person", "owner")
+        message = (f"Snoozed — I'll bring it back "
+                   f"{friendly(rem.snoozed_until, self.clock.now())}.")
+        await self._finish_system_reply(message, person, source="timer")
+        return {"ok": True, "reminder": rem.to_dict(), "message": message}
+
+    async def timer_dismiss(self, timer_id: str, person: str | None = None) -> dict:
+        info = self.pending_timers.get(timer_id)
+        if info is None:
+            return {"ok": False, "error": "no pending timer decision for that id"}
+        self._clear_pending_timer(timer_id)
+        done = self.reminders.acknowledge(timer_id) or self.reminders.cancel(timer_id)
+        if done is None:
+            return {"ok": False, "error": "reminder not found"}
+        await self._emit({"type": "timers_changed"})
+        return {"ok": True, "reminder": done.to_dict()}
+
     # ------------------------------------------------------------------ reminder delivery
     async def deliver_reminder(self, reminder: Reminder, note: str = "") -> None:
         """ReminderScheduler callback. Delivered even with no model (plain
-        text); phrased naturally by the persona when the model is up."""
+        text); phrased naturally by the persona when the model is up.
+        Timers get the dedicated repeat/snooze/dismiss flow instead."""
+        if reminder.kind == "timer":
+            await self._deliver_timer(reminder)
+            return
         await self._emit({"type": "reminder_due", "id": reminder.id, "text": reminder.text})
         if self.chat_provider is not None and not self._streaming:
             try:
@@ -497,7 +786,24 @@ class ConversationManager:
                 pass
         text = f"⏰ Reminder: {reminder.text}" + (f" ({note})" if note else "")
         await self._finish_system_reply(text, reminder.person, source="reminder")
+        await self._announce(text)  # voice announcement, when enabled (spoken once)
         self._log_proactive("reminder_delivery", text, reminder.id)
+
+    async def _deliver_timer(self, timer: Reminder) -> None:
+        """Timer completion: ask once about repeating, register the pending
+        decision, and keep a visible notification. Never re-prompts on its
+        own and never restarts the timer without permission."""
+        duration = self._timer_duration_hint(timer)
+        self._register_pending_timer(timer, duration)
+        label = f" — {timer.text}" if timer.text and not timer.text.lower().startswith("timer") else ""
+        text = f"⏱️ Your timer is up{label}. Would you like me to repeat it?"
+        await self._emit({"type": "timer_due", "id": timer.id, "text": timer.text,
+                          "duration": duration})
+        await self._finish_system_reply(
+            text, timer.person, source="timer",
+            meta={"timer_decision": {"id": timer.id, "duration": duration, "text": timer.text}})
+        await self._announce(text)  # spoken exactly once per fire
+        self._log_proactive("timer_delivery", text, timer.id)
 
     # ------------------------------------------------------------------ proactive initiation
     def set_proactive_callback(self, touch_fn) -> None:

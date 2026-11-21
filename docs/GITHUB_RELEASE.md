@@ -46,9 +46,8 @@ openai-compatible  self-hosted  agpl  python
   `good first issue`.
 - **Discussions**: optional; Q&A category for setup help keeps issues clean.
 - **Pull requests**: enable; template from `CONTRIBUTING.md` works as-is.
-- **Actions**: `.github/workflows/tests.yml` runs Python 3.11 and 3.12 tests and Bash
-  syntax checks on pushes and pull requests. No secrets needed. Verify its first run
-  before enabling a required passing-check branch rule.
+- **Actions**: not required (the test suite is pure pytest and runs locally); if added
+  later, a simple `pytest` workflow is enough — no secrets needed.
 - **Branch protection**: protect `main` (require PR + passing checks once CI exists).
 - **Do not** enable "Template repository"; Aurora carries state assumptions.
 - **Security**: enable private vulnerability reporting; the `SECURITY.md` file is not
@@ -67,14 +66,16 @@ openai-compatible  self-hosted  agpl  python
 6. Tag and push: `git tag -a v0.9.0 -m "Aurora Companion v0.9.0 — first public release"`
    then `git push origin main --tags`.
 7. Draft the GitHub release from the tag with the notes in §7; attach the built
-   `Aurora-Companion.zip` (optional — the tag itself is sufficient).
+   `Aurora-Companion.zip`. The zip is REQUIRED for Aurora's one-button updater
+   (it downloads exactly that asset name; a tag-only release cannot be installed
+   through the dashboard).
 8. Upload the social preview image (§4).
 9. After publishing: pin the README, verify the About description/topics, and check the
    repository renders the screenshots (paths are relative and case-sensitive).
 
 ## 6. Initial versioning recommendation
 
-**`v0.9.0`** (planned; do not tag before Portable validation) — "release candidate": the application is feature-complete for its
+**`v0.9.0`** — "release candidate": the application is feature-complete for its
 design (personality evolution, memory, reminders, proactive loop, voice adapters,
 resource-aware operation, hardened deployment), with 232 automated tests, but real-world
 mileage on live audio hardware and long-running personality evolution is still being
@@ -110,18 +111,16 @@ Highlights
 - 232 automated tests; built-in mock provider + fictional demo database for offline trials
 
 Status
-Experimental (v0.9.0 release candidate). Audio I/O and live services require verification on
-target machines; they have not been verified in CI — see docs/TEST_RESULTS.md and docs/LIMITATIONS.md.
+Experimental (v0.9.0 release candidate). Audio I/O and live services are verified on
+target machines, not in CI — see docs/TEST_RESULTS.md and docs/LIMITATIONS.md.
 
 License: AGPL-3.0-or-later (see NOTICE.md for upstream attribution).
 ```
 
 ## 8. Uploading and publishing the existing repository
 
-If publishing directly from Z.ai’s original Git checkout, preserve its history.
-A downloadable ZIP **does not contain the upstream Git history**; importing the ZIP
-into an existing repository creates a new snapshot commit, not a reconstruction of
-those historical commits:
+The repository already exists locally with its full history (do not recreate or squash
+it — the history is part of the record):
 
 ```bash
 # 1. from the project root

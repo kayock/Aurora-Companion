@@ -37,10 +37,3 @@ Thumbs.db
 
 # --- Node (dashboard tooling, if ever used) ---
 node_modules/
-
-# local project/release staging
-*.zip
-dist/
-build/
-.coverage
-htmlcov/

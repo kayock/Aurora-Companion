@@ -18,8 +18,50 @@ state, permissions, per-person memory, dashboard over the same APIs.
   TTS with live voice discovery, Faster-Whisper STT forwarding webm/opus, plus local
   Kokoro/whisper alternatives). **Never exercised against real audio hardware or the live
   Kayock binaries in the build environment** — the first hardware pass on Portable is the
-  real test (docs/PORTABLE_DEPLOY.md §7 checklist). Barge-in, echo handling and wake words
-  are **not implemented** (they need a live mic loop).
+  real test (docs/PORTABLE_DEPLOY.md §7 checklist). Barge-in and echo handling are
+  **not implemented** (they need a live mic loop). The optional "Hey Aurora" wake-word
+  mode IS implemented (browser-local energy VAD + the existing STT endpoint) but is an
+  energy threshold, not a neural keyword spotter: expect occasional false triggers in
+  noisy rooms, and it needs a secure context (HTTPS/localhost) like all mic access.
+
+### New in this round (reminders/timers/updater) — honest limits
+
+- **Chime** is generated in the browser (WebAudio); the browser tab must be open for
+  reminders to chime or the bell to update live. Server-side TTS announcements
+  (`notifications.voice_announce`) work independently of the tab but need
+  `voice.server_speak: true` and a TTS engine.
+- **Timer answers** ("repeat" / "five more minutes" / "dismiss") target the most
+  recently fired pending timer; with several pending at once, use the per-timer
+  buttons (or name the timer — that still goes through the model).
+- **Updater** — fully verified live against a LOCAL fake-GitHub release server
+  (see TEST_RESULTS.md §0: install → restart → verify → rollback, 18/18, plus the
+  Portable-permission reproduction, 28/28). The api.github.com path is the same
+  code (`update.api_base`), but **no public Aurora release repository exists yet**,
+  so the first real release check on the live service remains to be done once a
+  repo + release zip are published. The updater never downgrades the database
+  (rollback restores app tree + config only). Release verification is zip-CRC +
+  structure + `run.py` presence; no published SHA256SUMS exists yet, so a
+  compromised upstream host could serve a valid-zip payload — adding a signed
+  digest is the next hardening step if/when a public repo exists.
+- **Portable updater reproduction honesty** — the sandbox has no systemd, polkit
+  or root, so `scripts/verify_portable_update_e2e.py` reproduces the
+  `ProtectSystem=strict` filesystem effect at the permission level (write bits
+  removed from the app tree) and executes the helper directly; the privilege
+  SEPARATION (root helper + polkit-gated start of one unit) is verified
+  structurally (manifest path-escape refusal, fixed script, unit files), not by
+  running a real Portable deployment. The privilege boundary now additionally
+  rests on root-controlled authorized values (`/etc/aurora-update-authorized.json`)
+  and on an explicit extraction allowlist in the rollback path
+  (`_safe_extract`: only regular files/directories inside staging, validated
+  before any write — verified by the reproducible escape in
+  `scripts/verify_tar_vuln.py` pre-fix and its refusal post-fix, plus 9
+  dedicated tests). Their uid-0 ownership enforcement and the systemd activation
+  conditions are verified structurally and against the published
+  systemd.unit(5) semantics —
+  not against a live root systemd. The first real run on Portable remains the
+  final proof (`docs/PORTABLE_DEPLOY.md §3b`).
+- **"in a few hours"-style word-amount durations** still do not parse
+  (pre-existing; "in 20 minutes" / "15 minutes" / "tomorrow at 9am" etc. do).
 - **GPU Traffic Light coordination** — a generic read-only prober ships (GET
   /health|/status|/ + configurable busy markers), disabled by default; its real protocol
   must be verified on Portable before enabling. Fail-open by design (a broken light never

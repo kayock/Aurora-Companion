@@ -149,6 +149,20 @@ DEFAULTS: dict[str, Any] = {
         "multi_person": False,  # explicit opt-in for multi-person sessions
         "guest_mode": True,
     },
+    "notifications": {
+        "chime": True,            # gentle browser chime when a reminder/timer comes due
+        "voice_announce": False,  # speak reminders/timers via the configured TTS
+    },
+    "update": {
+        # GitHub repo to check for releases, e.g. "kayock/Aurora-Companion".
+        # Empty = update check disabled (the dashboard still shows the version).
+        "repo": "",
+        "asset": "Aurora-Companion.zip",
+        # API base — change only for GitHub Enterprise / Gitea look-alikes.
+        "api_base": "https://api.github.com",
+        "allow_prerelease": False,
+        "timeout_seconds": 20.0,
+    },
     "logging": {"level": "info"},
 }
 
@@ -164,12 +178,12 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 class Config:
-    def __init__(self, data: dict[str, Any], path: Path | str | None = None) -> None:
+    def __init__(self, data: dict[str, Any], path: Path | None = None) -> None:
         self._data = _deep_merge(DEFAULTS, data)
-        self.path = Path(path) if path is not None else None
+        self.path = path
 
     @classmethod
-    def load(cls, path: Path | str | None) -> "Config":
+    def load(cls, path: Path | None) -> "Config":
         if path is None:
             return cls({})
         with open(path, "r", encoding="utf-8") as fh:

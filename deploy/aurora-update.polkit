@@ -1,0 +1,21 @@
+// polkit authorization for Aurora's one-button updater.
+//
+// The Aurora service runs with NoNewPrivileges=true (no sudo, no elevation),
+// so the only way for the dashboard's "Install update" button to reach root
+// is systemd: the dashboard starts the one-shot aurora-update.service unit,
+// which runs the fixed helper script as root.
+//
+// This rule allows the `aurora` user to start EXACTLY that unit — not stop
+// or restart it, not any other unit. Adjust the user name if you deployed
+// with a different AURORA_USER.
+//
+// Install: sudo cp deploy/aurora-update.polkit /etc/polkit-1/rules.d/60-aurora-update.rules
+
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "aurora" &&
+        action.lookup("unit") == "aurora-update.service" &&
+        action.lookup("verb") == "start") {
+        return polkit.Result.YES;
+    }
+});

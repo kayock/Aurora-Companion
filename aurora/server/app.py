@@ -225,6 +225,8 @@ def create_server(app: CompanionApp) -> FastAPI:
         due = float(body["due_at"]) if body.get("due_at") else parse_when(when, app.clock.now())
         if due is None:
             raise HTTPException(400, f"could not parse time \"{when}\"; try 'in 10 minutes' or 'tomorrow at 9am'")
+        kind = str(body.get("kind", ""))
+        duration = int(round(due - app.clock.now())) if kind == "timer" else None
         try:
             rem = app.reminders.add(
                 text, due,
@@ -234,6 +236,7 @@ def create_server(app: CompanionApp) -> FastAPI:
                 follow_up_max=body.get("follow_up_max"),
                 project=str(body.get("project", "")),
                 person=str(body.get("person", "owner")),
+                kind=kind, duration=duration,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc))
@@ -263,6 +266,64 @@ def create_server(app: CompanionApp) -> FastAPI:
     @api.get("/api/reminders/deliveries")
     async def reminder_deliveries():
         return {"deliveries": app.reminder_scheduler.deliveries[-100:]}
+
+    # ------------------------------------------------------------ notifications + timers
+    @api.get("/api/alerts")
+    async def alerts():
+        """Notification bell payload: active reminders + timers awaiting a
+        repeat/snooze/dismiss answer."""
+        return app.conversation.alerts()
+
+    @api.post("/api/timers/{timer_id}/{action}")
+    async def timer_action(timer_id: str, action: str, request: Request):
+        """Repeat / snooze / dismiss a fired timer. Timers are never restarted
+        automatically — this endpoint is the user's explicit decision."""
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+        if action == "repeat":
+            result = await app.conversation.timer_repeat(timer_id)
+        elif action == "snooze":
+            result = await app.conversation.timer_snooze(timer_id, int(body.get("seconds", 300)))
+        elif action == "dismiss":
+            result = await app.conversation.timer_dismiss(timer_id)
+        else:
+            raise HTTPException(400, f"unknown timer action {action}")
+        if not result.get("ok"):
+            raise HTTPException(404, result.get("error", "timer not found"))
+        app.reminder_scheduler.notify_changed()
+        return result
+
+    # ------------------------------------------------------------ software update
+    @api.get("/api/update/status")
+    async def update_status():
+        return app.updater.public_state()
+
+    @api.post("/api/update/check")
+    async def update_check():
+        return app.updater.check()
+
+    @api.post("/api/update/apply")
+    async def update_apply():
+        """Back up, download, verify and install. Requires the user's
+        explicit confirmation (dashboard button) — never automatic."""
+        try:
+            return app.updater.apply()
+        except Exception as exc:
+            return JSONResponse({"error": str(exc), "installed": False}, status_code=400)
+
+    @api.post("/api/update/restart")
+    async def update_restart():
+        return app.updater.restart_soon()
+
+    @api.post("/api/update/rollback")
+    async def update_rollback():
+        try:
+            return app.updater.rollback()
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     # ------------------------------------------------------------ personality
     @api.get("/api/persona")

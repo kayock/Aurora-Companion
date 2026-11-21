@@ -56,6 +56,22 @@ voice:
   auto_speak: false       # dashboard "speak replies" plays audio client-side
   server_speak: false     # server-side synthesis hook (API-only setups)
 
+# Notification behaviour for the dashboard bell (Settings → Notifications
+# toggles the same keys; the chime itself plays in the browser, no audio files).
+notifications:
+  chime: true            # gentle two-tone chime when a reminder/timer comes due
+  voice_announce: false  # speak reminders/timers through the configured TTS
+                         # (needs voice.server_speak: true and a TTS engine)
+
+# One-button self-update (Settings → Software update). Empty repo = check
+# disabled. Updates are user-approved, backup-first, and rollback-able.
+update:
+  repo: ""               # GitHub repo, e.g. "kayock/Aurora-Companion"
+  asset: "Aurora-Companion.zip"
+  api_base: "https://api.github.com"   # change for GitHub Enterprise / Gitea
+  allow_prerelease: false
+  timeout_seconds: 20.0
+
 # Resource-aware operation: background AI defers when compute is needed
 # elsewhere (see docs/PORTABLE_DEPLOY.md §6).
 resources:

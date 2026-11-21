@@ -221,6 +221,36 @@ if [[ $INSTALL_SERVICE -eq 1 ]]; then
   sleep 2
   systemctl --no-pager status aurora-companion.service | head -8 || true
 
+  # one-button updater support: the service itself runs read-only
+  # (ProtectSystem=strict) and cannot elevate (NoNewPrivileges), so updates
+  # are applied by a fixed, root-only helper unit triggered via polkit. The
+  # polkit rule authorizes the $AURORA_USER user to START exactly
+  # aurora-update.service — nothing else.
+  echo "-- installing update helper (aurora-update.service) --"
+  # GNU install takes ownership via -o/-g (a "root:root" positional would be
+  # parsed as a SOURCE path and abort the whole installer under set -e)
+  install -m 0755 -o root -g root \
+      "$SRC/deploy/aurora-update-helper" /usr/local/bin/aurora-update-helper
+  # the helper's authority is pinned to root-controlled values, never to
+  # whatever the manifest claims: non-default installs are recorded here
+  # (root-owned 0644; the helper refuses a file it does not own)
+  cat > /etc/aurora-update-authorized.json <<EOF
+{"app_dir": "$AURORA_HOME", "data_dir": "$AURORA_DATA", "unit": "aurora-companion.service", "config_path": "$AURORA_ETC/config.yaml"}
+EOF
+  chown root:root /etc/aurora-update-authorized.json
+  chmod 0644 /etc/aurora-update-authorized.json
+  sed -e "s|/var/lib/aurora/update|$AURORA_DATA/update|g" \
+      -e "s|/opt/aurora-companion|$AURORA_HOME|g" \
+      "$SRC/deploy/aurora-update.service" > /etc/systemd/system/aurora-update.service
+  if [[ -d /etc/polkit-1/rules.d ]]; then
+    sed "s|subject.user == \"aurora\"|subject.user == \"$AURORA_USER\"|" \
+        "$SRC/deploy/aurora-update.polkit" > /etc/polkit-1/rules.d/60-aurora-update.rules
+    echo "   polkit rule installed (/etc/polkit-1/rules.d/60-aurora-update.rules)"
+  else
+    echo "   WARN polkit rules.d not found — dashboard updates will report the manual command"
+  fi
+  systemctl daemon-reload
+
   cat <<EOF
 
 == done ==

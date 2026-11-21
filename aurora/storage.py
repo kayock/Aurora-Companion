@@ -112,7 +112,9 @@ CREATE TABLE IF NOT EXISTS reminders (
     snoozed_until REAL,
     project       TEXT NOT NULL DEFAULT '',
     person        TEXT NOT NULL DEFAULT 'owner',
-    source        TEXT NOT NULL DEFAULT 'user'
+    source        TEXT NOT NULL DEFAULT 'user',
+    kind          TEXT NOT NULL DEFAULT '',  -- '' | 'timer' (timer interaction flow)
+    duration      INTEGER                    -- intended timer length in seconds (timers only)
 );
 CREATE INDEX IF NOT EXISTS reminders_due ON reminders (status, due_at);
 
@@ -209,7 +211,27 @@ class Database:
             version = self.get_meta("schema_version")
             if version is None:
                 self.set_meta("schema_version", str(SCHEMA_VERSION))
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive column migrations for databases created by older builds.
+
+        Only adds columns that are missing (checked via PRAGMA table_info),
+        so re-running is a no-op and existing rows keep their data — user
+        memory and settings are never rewritten here.
+        """
+        wanted = {"reminders": {"kind": "TEXT NOT NULL DEFAULT ''",
+                                "duration": "INTEGER"}}
+        with self._lock:
+            for table, columns in wanted.items():
+                existing = {r["name"] for r in
+                            self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if not existing:
+                    continue  # table not created yet (fresh DB has it via _SCHEMA)
+                for name, decl in columns.items():
+                    if name not in existing:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     # -- generic helpers -------------------------------------------------
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
@@ -253,6 +275,17 @@ class Database:
         import json
 
         self.set_meta(key, json.dumps(value, ensure_ascii=False))
+
+    def backup_to(self, path: Path) -> None:
+        """Online, consistent snapshot of the whole store (sqlite backup API
+        — safe while the app is running). Used by deploy/backup.sh-style
+        flows and by the updater's pre-update backup."""
+        with self._lock:
+            dest = sqlite3.connect(str(path))
+            try:
+                self._conn.backup(dest)
+            finally:
+                dest.close()
 
     def close(self) -> None:
         with self._lock:

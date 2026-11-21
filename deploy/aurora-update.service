@@ -1,0 +1,37 @@
+# One-shot root helper that applies Aurora updates prepared by the updater
+# (aurora/updater.py, assisted mode). The Aurora service itself runs with
+# ProtectSystem=strict + NoNewPrivileges — it cannot write /opt and cannot
+# elevate — so this narrowly scoped unit is the only component allowed to
+# change the application tree, and only from a validated manifest inside
+# /var/lib/aurora/update/.
+#
+# The companion polkit rule (deploy/aurora-update.polkit, installed to
+# /etc/polkit-1/rules.d/60-aurora-update.rules) lets the `aurora` user START
+# this unit — and nothing else. `apply` exits 0 without touching anything
+# when no manifest is pending, so an accidental start is inert.
+#
+#   sudo cp deploy/aurora-update.service /etc/systemd/system/
+#   sudo cp deploy/aurora-update-helper /usr/local/bin/
+#   sudo cp deploy/aurora-update.polkit /etc/polkit-1/rules.d/60-aurora-update.rules
+#   sudo systemctl daemon-reload
+
+[Unit]
+Description=Aurora Companion — apply staged update/rollback (root helper)
+# Activation: EITHER manifest. systemd conditions are ANDed; the pipe symbol
+# marks a condition "triggering", and triggering conditions are ORed among
+# themselves but ANDed with every regular condition (systemd.unit(5)). The
+# previous mix (one regular + one triggering) therefore started the unit only
+# when BOTH manifests existed — a rollback-only request could never activate.
+# Missing or invalid requests are still safely rejected by the helper itself:
+# apply is inert with no manifest and refuses a both-manifests state for
+# human review.
+ConditionPathExists=|/var/lib/aurora/update/install-manifest.json
+ConditionPathExists=|/var/lib/aurora/update/rollback-manifest.json
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aurora-update-helper apply /var/lib/aurora/update
+
+[Install]
+WantedBy=multi-user.target

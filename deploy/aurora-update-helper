@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""Aurora update helper — the narrowly authorized root side of the updater.
+
+On Portable the Aurora service runs under systemd with ProtectSystem=strict
+and NoNewPrivileges=true: it cannot write /opt/aurora-companion and cannot
+elevate. This helper is the ONLY component allowed to change the application
+tree, and only through a strictly validated manifest written by the updater
+into the (service-writable) data directory:
+
+    install  <manifest.json>   stage the new tree, carry venv/.git/config,
+                               restart the service
+    rollback <manifest.json>   restore the previous tree from the backup
+    validate <manifest.json>   check a manifest only; change nothing
+    apply    <update-dir>      systemd entry point: apply whichever manifest
+                               the updater staged (inert when none pending)
+
+Hard rules (mirroring aurora/updater.py):
+- staging and backup paths MUST resolve inside the ROOT-AUTHORIZED data
+  directory — path escapes are refused before anything is touched;
+- the application target, data directory, service unit and config path come
+  from a ROOT-CONTROLLED authorization, never from the manifest: Aurora
+  (which can write manifests) cannot point privileged operations at another
+  application tree, restart another unit, or overwrite another config file;
+- every path is canonicalized (symlinks resolved) BEFORE comparison and use;
+- the application files are replaced; the database is NEVER reverted;
+- nothing is downloaded or executed beyond this fixed script;
+- the manifest is read once, re-validated, and every action is journaled to
+  stdout (captured by the journal via aurora-update.service).
+
+Authorization source (in order): $AURORA_UPDATE_AUTHORIZED (used by tests and
+the reproduction E2E only; the systemd unit sets nothing), then
+/etc/aurora-update-authorized.json (root-owned 0644, written by install.sh for
+non-default paths), then built-in defaults. An authorization file that is not
+root-owned or is group/world-writable is refused.
+
+Installed by deploy/install.sh as /usr/local/bin/aurora-update-helper
+(root:root 0755) together with aurora-update.service (oneshot, root) and a
+polkit rule that lets the `aurora` user START only that one unit.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+from pathlib import Path
+
+CARRY = ("venv", ".git", "config.yaml", "aurora.env")
+REQUIRED_KEYS = {"action", "app_dir", "data_dir", "backup", "keep", "unit"}
+ACTIONS = {"install", "rollback"}
+UNIT_RE = re.compile(r"^[A-Za-z0-9_.@-]+\.service$")
+DEFAULT_AUTHORIZED = {
+    "app_dir": "/opt/aurora-companion",
+    "data_dir": "/var/lib/aurora",
+    "unit": "aurora-companion.service",
+    "config_path": "/etc/aurora/config.yaml",
+}
+AUTHORIZED_SYSTEM_PATH = "/etc/aurora-update-authorized.json"
+
+
+class ManifestError(Exception):
+    pass
+
+
+def log(msg: str) -> None:
+    print(f"[aurora-update-helper] {time.strftime('%Y-%m-%d %H:%M:%S')} {msg}",
+          flush=True)
+
+
+def _inside(child: Path, parent: Path) -> bool:
+    """True when child resolves strictly inside parent (no symlink escape)."""
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def load_authorized() -> dict:
+    """Root-controlled values the helper may act on. The manifest cannot
+    influence any of them. The env override exists solely for tests and the
+    reproduction E2E (the systemd unit sets no environment, so a real
+    deployment always uses the strictly checked system path)."""
+    auth = dict(DEFAULT_AUTHORIZED)
+    override = os.environ.get("AURORA_UPDATE_AUTHORIZED")
+    source = override or AUTHORIZED_SYSTEM_PATH
+    path = Path(source)
+    if not path.is_file():
+        if override:
+            raise ManifestError(f"authorization override {source} not found")
+        return auth
+    st = path.stat()
+    if override:
+        ok = st.st_uid == os.geteuid() and not st.st_mode & 0o022
+    else:
+        ok = st.st_uid == 0 and not st.st_mode & 0o022
+    if not ok:
+        raise ManifestError(
+            f"authorization file {source} must be owned by the invoking "
+            "root and not group/world-writable — refused")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ManifestError(f"authorization file unreadable: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ManifestError("authorization file must be a JSON object")
+    for key in DEFAULT_AUTHORIZED:
+        if key in data:
+            value = data[key]
+            if not isinstance(value, str) or (not value and key != "config_path"):
+                # config_path may be empty: no authorized config file
+                raise ManifestError(f"authorization value {key!r} invalid")
+            auth[key] = value
+    if not UNIT_RE.match(auth["unit"]):
+        raise ManifestError(f"authorized unit name {auth['unit']!r} invalid")
+    for key in ("app_dir", "data_dir", "config_path"):
+        if key == "config_path" and not auth[key]:
+            continue  # empty = no authorized config file (dev-style installs)
+        if not Path(auth[key]).is_absolute():
+            raise ManifestError(f"authorized {key} must be absolute")
+    return auth
+
+
+def _canonical(value: str) -> str:
+    """Canonical form: resolve symlinks and collapse .. entirely."""
+    return str(Path(value).resolve(strict=False))
+
+
+def validate_manifest(path: Path) -> dict:
+    try:
+        manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ManifestError(f"manifest unreadable: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ManifestError("manifest must be a JSON object")
+    missing = REQUIRED_KEYS - set(manifest)
+    if missing:
+        raise ManifestError(f"manifest missing keys: {sorted(missing)}")
+    if manifest["action"] not in ACTIONS:
+        raise ManifestError(f"unknown action {manifest['action']!r}")
+
+    auth = load_authorized()
+    auth_app = _canonical(auth["app_dir"])
+    auth_data = _canonical(auth["data_dir"])
+    auth_cfg = _canonical(auth["config_path"])
+
+    # absolute-ness first, canonicalization next, THEN comparison
+    for name in ("app_dir", "data_dir", "backup", "staging", "config_path"):
+        raw = manifest.get(name)
+        if raw and not Path(raw).is_absolute():
+            raise ManifestError(f"{name} must be an absolute path")
+
+    app_dir = _canonical(manifest["app_dir"])
+    data_dir = _canonical(manifest["data_dir"])
+    manifest["app_dir"], manifest["data_dir"] = app_dir, data_dir
+
+    # the manifest's privileged destinations must match the root-controlled
+    # authorization EXACTLY after canonicalization — a writable manifest can
+    # never redirect the helper to another tree, data dir or config file
+    if app_dir != auth_app:
+        raise ManifestError(
+            f"app_dir {app_dir} is not the authorized installation "
+            f"({auth_app}) — refused")
+    if data_dir != auth_data:
+        raise ManifestError(
+            f"data_dir {data_dir} is not the authorized data directory "
+            f"({auth_data}) — refused")
+    if manifest["unit"] != auth["unit"]:
+        raise ManifestError(
+            f"unit {manifest['unit']!r} is not the authorized service "
+            f"({auth['unit']!r}) — refused")
+    cfg = manifest.get("config_path") or ""
+    if cfg and _canonical(cfg) != auth_cfg:
+        raise ManifestError(
+            f"config_path {cfg} is not the authorized config file "
+            f"({auth_cfg}) — refused")
+    manifest["config_path"] = _canonical(cfg) if cfg else ""
+
+    # staging (install) and backup must both live INSIDE the authorized data
+    # dir: the service can only write there, so a manifest pointing elsewhere
+    # did not come from Aurora's updater
+    for name in ("staging", "backup"):
+        raw = manifest.get(name, "")
+        if not raw:
+            continue  # rollback manifests have no staging; installs have both
+        p = _canonical(raw)
+        manifest[name] = p
+        if not _inside(Path(p), Path(auth_data)):
+            raise ManifestError(f"{name} {raw} is outside the data dir — refused")
+    if "app-tree.tar.gz" in manifest.get("backup", "") and \
+            not Path(manifest["backup"], "app-tree.tar.gz").is_file():
+        raise ManifestError(f"backup archive missing: {manifest['backup']}")
+    keep = manifest["keep"]
+    if not isinstance(keep, list) or any(k not in CARRY for k in keep):
+        raise ManifestError(f"keep list must be a subset of {list(CARRY)}")
+    return manifest
+
+
+def _carry_aside(app_dir: Path, keep: list, aside: Path) -> None:
+    aside.mkdir(parents=True, exist_ok=True)
+    for name in keep:
+        src = app_dir / name
+        if src.exists():
+            os.replace(src, aside / f".{name}-carry")
+
+
+def _move_back(app_dir: Path, aside: Path, keep: list) -> None:
+    for name in keep:
+        carried = aside / f".{name}-carry"
+        if carried.exists():
+            dest = app_dir / name
+            if dest.is_dir() and carried.is_dir():
+                # a backup could contain its own copy of a carried directory
+                # (older format); the carried one is the authoritative live
+                # state — never leave a half-restored tree behind
+                shutil.rmtree(dest, ignore_errors=True)
+            os.replace(carried, dest)
+
+
+def _restart(unit: str) -> None:
+    if shutil.which("systemctl"):
+        log(f"restarting {unit}")
+        subprocess.run(["systemctl", "restart", unit], capture_output=True)
+    else:
+        log("systemctl not available — restart manually")
+
+
+def do_install(manifest: dict) -> int:
+    app_dir = Path(manifest["app_dir"])
+    staging = Path(manifest["staging"])
+    if not (staging / "run.py").is_file():
+        log(f"REFUSED: staged tree has no run.py: {staging}")
+        return 2
+    if app_dir.exists() and not app_dir.is_dir():
+        log(f"REFUSED: app_dir is not a directory: {app_dir}")
+        return 2
+    aside = staging.parent / ".carry"
+    log(f"installing {manifest['new_version']} → {app_dir}")
+    if app_dir.exists():
+        _carry_aside(app_dir, manifest["keep"], aside)
+        previous = app_dir.parent / (app_dir.name + ".previous")
+        shutil.rmtree(previous, ignore_errors=True)
+        os.replace(app_dir, previous)
+        try:
+            os.replace(staging, app_dir)
+        except Exception as exc:
+            os.replace(previous, app_dir)  # put the old tree back
+            _move_back(app_dir, aside, manifest["keep"])
+            log(f"install failed, previous tree restored: {exc}")
+            return 3
+        shutil.rmtree(previous, ignore_errors=True)
+    else:
+        os.replace(staging, app_dir)
+    _move_back(app_dir, aside, manifest["keep"])
+    log("install complete — database and configuration were not touched")
+    _restart(manifest["unit"])
+    return 0
+
+
+def _make_writable(root: Path) -> None:
+    """A backup stores the modes of the tree it captured — which on a locked
+    (read-only) app tree have no write bits. Extraction must always be able
+    to write."""
+    import stat
+    for p in root.rglob("*"):
+        try:
+            p.chmod(p.stat().st_mode | stat.S_IWUSR | (stat.S_IXUSR if p.is_dir() else 0))
+        except OSError:
+            pass
+    root.chmod(root.stat().st_mode | stat.S_IWUSR | stat.S_IXUSR)
+
+
+def _safe_extract(archive: Path, staging: Path) -> None:
+    """Extract a rollback archive with an explicit allowlist.
+
+    The backup archive lives in the service-writable data directory, so the
+    helper (running as root) must never trust its content: every member is
+    validated BEFORE anything is written, and only regular files and
+    directories are extracted. This does NOT rely on Python-version-dependent
+    tarfile extraction defaults (3.12/3.13 still extract fully trusted unless
+    a filter is passed; 3.14 changes the default) — the checks below are
+    explicit and version-independent:
+
+    - absolute member names and any '..' component are rejected;
+    - every member's final path must resolve strictly inside staging;
+    - symlinks, hard links, devices, FIFOs and every other special type are
+      rejected (they are never needed in an application backup);
+    - files and directories are written member-by-member with normalized
+      modes, so no archive-controlled mode can affect the extraction.
+    """
+    with tarfile.open(archive) as tf:
+        members = tf.getmembers()
+        for m in members:
+            name = m.name
+            if not name or name.strip("/") == "":
+                raise ManifestError(
+                    f"backup archive member with unexpected name {name!r}")
+            if name.startswith("/") or (len(name) > 1 and name[1] == ":"):
+                raise ManifestError(
+                    f"backup archive contains an absolute member: {name!r}")
+            parts = name.replace("\\", "/").split("/")
+            if any(p == ".." for p in parts):
+                raise ManifestError(
+                    f"backup archive contains a traversal member: {name!r}")
+            if not _inside(staging / name, staging):
+                raise ManifestError(
+                    f"backup archive member escapes staging: {name!r}")
+            if m.isdir():
+                continue
+            if m.isreg():
+                continue
+            kind = ("symlink" if m.issym() else "hardlink" if m.islnk()
+                    else "special (device/fifo/…)")
+            raise ManifestError(
+                f"backup archive contains a {kind} member: {name!r}")
+        for m in members:  # validated above — now extract member by member
+            dest = staging / m.name
+            if m.isdir():
+                dest.mkdir(parents=True, exist_ok=True)
+                os.chmod(dest, 0o755)
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                src = tf.extractfile(m)
+                if src is None:  # unreachable: m.isreg() was checked above
+                    raise ManifestError(
+                        f"backup archive member unreadable: {m.name!r}")
+                with src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                os.chmod(dest, 0o644)
+    os.chmod(staging, 0o755)
+
+
+def do_rollback(manifest: dict) -> int:
+    app_dir = Path(manifest["app_dir"])
+    backup = Path(manifest["backup"])
+    archive = backup / "app-tree.tar.gz"
+    log(f"rolling back to {manifest.get('previous_version', '?')}")
+    staging = backup.parent / ".rollback-staging"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    # the archive is service-user-writable: validate and extract safely, and
+    # fail CLEANLY — the live application is only touched after the staging
+    # tree is fully extracted and its layout verified
+    try:
+        _safe_extract(archive, staging)
+    except ManifestError as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        log(f"REFUSED: {exc}")
+        return 2
+    except (tarfile.TarError, OSError) as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        log(f"REFUSED: unreadable or malformed backup archive: {exc}")
+        return 2
+    _make_writable(staging)
+    restored = staging / app_dir.name
+    if not restored.is_dir():
+        log(f"REFUSED: backup archive layout unexpected (no {app_dir.name}/)")
+        return 2
+    _carry_aside(app_dir, manifest["keep"], staging)
+    shutil.rmtree(app_dir, ignore_errors=True)
+    os.replace(restored, app_dir)
+    _move_back(app_dir, staging, manifest["keep"])
+    shutil.rmtree(staging, ignore_errors=True)
+    # the service's own config file (dev mode: inside the app tree) reverts;
+    # /etc/aurora config is root-managed and stays as-is unless present in
+    # the backup's config.yaml copy
+    cfg_copy = backup / "config.yaml"
+    config_path = manifest.get("config_path") or ""
+    if cfg_copy.is_file() and config_path and Path(config_path).is_file():
+        shutil.copy2(cfg_copy, Path(config_path))
+        log(f"config restored from backup: {config_path}")
+    log("rollback complete — the database (memories, reminders, persona) was "
+        "NOT reverted")
+    _restart(manifest["unit"])
+    return 0
+
+
+def _find_manifest(update_dir: Path) -> Path | None:
+    """Install takes precedence; both manifests at once is suspicious and is
+    refused for human review rather than guessed at."""
+    install = update_dir / "install-manifest.json"
+    rollback = update_dir / "rollback-manifest.json"
+    if install.is_file() and rollback.is_file():
+        raise ManifestError(
+            "both install and rollback manifests are pending — resolve "
+            "manually (inspect them, remove one, then start the unit again)")
+    if install.is_file():
+        return install
+    if rollback.is_file():
+        return rollback
+    return None
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "apply":
+        # systemd unit entry point: apply whichever manifest the updater
+        # staged in the data dir; inert when none is pending; a suspicious
+        # state (both manifests, unreadable, unauthorized) is a CLEAN refusal
+        try:
+            pending = _find_manifest(Path(args[1]))
+            if pending is None:
+                log("no update manifest pending — nothing to do")
+                return 0
+            log(f"applying {pending.name}")
+            manifest = validate_manifest(pending)
+        except ManifestError as exc:
+            log(f"REFUSED: {exc}")
+            return 65
+        rc = do_install(manifest) if manifest["action"] == "install" \
+            else do_rollback(manifest)
+        if rc == 0:
+            pending.unlink(missing_ok=True)  # consumed: the next staged
+            # action (e.g. a later rollback) must not collide with it
+        return rc
+    if len(args) != 2 or args[0] not in {"install", "rollback", "validate"}:
+        print(__doc__)
+        return 64
+    action, manifest_path = args[0], Path(args[1])
+    try:
+        manifest = validate_manifest(manifest_path)
+    except ManifestError as exc:
+        log(f"REFUSED: {exc}")
+        return 65
+    if action == "validate":
+        log("manifest OK "
+            f"(action={manifest['action']}, version {manifest.get('previous_version')}"
+            f" → {manifest.get('new_version')})")
+        return 0
+    if manifest["action"] != action:
+        log(f"REFUSED: manifest is for {manifest['action']}, called for {action}")
+        return 65
+    return do_install(manifest) if action == "install" else do_rollback(manifest)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

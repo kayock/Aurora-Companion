@@ -100,6 +100,41 @@ Persistent=true
 Restore: stop the service, run the restore hint printed by `backup.sh` (executes the SQL
 dump into a fresh `aurora.db`), start the service.
 
+### 3b. One-button updates on Portable
+
+Aurora's service cannot update itself in place: `ProtectSystem=strict` makes
+`/opt/aurora-companion` read-only and `NoNewPrivileges=true` rules out sudo. The
+updater therefore runs in two modes:
+
+- **Writable tree (dev / non-hardened installs):** backup → download → verify →
+  swap → in-place restart, as documented in Settings → Software update.
+- **Portable (assisted mode):** backup, download and staging all happen inside the
+  writable data directory (`/var/lib/aurora/update/`), and the tree swap is performed
+  by a fixed, root-only helper — `aurora-update.service` (oneshot) running
+  `/usr/local/bin/aurora-update-helper`. The dashboard starts that one unit through a
+  polkit rule that authorizes the `aurora` user to START exactly it — nothing else.
+  The helper validates the manifest strictly (paths must resolve inside the data
+  directory), carries `venv/`, `.git/`, `config.yaml` and `aurora.env` across the
+  swap, never touches the database, and restarts the service.
+
+`install.sh` installs the helper, unit and polkit rule automatically. The helper's
+authority is pinned to root-controlled values (`/etc/aurora-update-authorized.json`,
+root-owned 0644): a manifest — which the service user can write — can never point
+the helper at another application tree, another systemd unit or another config
+file, and every manifest path is canonicalized (symlinks resolved) before it is
+compared. To enable update checks, set the repository in `/etc/aurora/config.yaml`:
+
+```yaml
+update:
+  repo: "kayock/Aurora-Companion"   # GitHub repo with releases + Aurora-Companion.zip
+```
+
+If polkit is unavailable, the dashboard shows the exact manual command instead
+(`sudo /usr/local/bin/aurora-update-helper <manifest>` — the staged release is
+already verified and the backup already taken). Rollback works the same way:
+one button, one helper run; the venv, git history, config and every memory,
+reminder and persona survive, because the database is never reverted.
+
 ## 4. LAN access and security
 
 - `host: 0.0.0.0` in the config makes the dashboard reachable at `http://10.0.0.45:8795`

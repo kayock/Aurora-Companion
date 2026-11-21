@@ -5,7 +5,176 @@ All notable changes to Aurora Companion. The project follows semver-ish versioni
 
 ## [Unreleased]
 
+### Fixed (privileged rollback extraction, 2026-11-21)
+- **Unsafe TAR extraction (confirmed + fixed):** the rollback path used a plain
+  `tarfile.extractall()`, which on Python 3.12/3.13 extracts fully trusted by
+  default. The backup archive lives in the service-user-writable data directory
+  and the helper runs as root — reproduced against the real helper: a
+  traversal member escaped outside the authorized data directory, an absolute
+  member was written at its absolute location, and a malicious tree replaced
+  the live application (scripts/verify_tar_vuln.py). The helper now extracts
+  with an explicit allowlist (`_safe_extract`): every member is validated
+  BEFORE anything is written — absolute paths and any `..` component are
+  rejected, every member's final path must resolve strictly inside staging,
+  symlinks/hardlinks/devices/FIFOs are rejected, and only regular files and
+  directories are extracted member-by-member with normalized modes (0755
+  dirs / 0644 files), version-independently. A malformed, truncated or
+  suspicious archive is refused cleanly (exit 2, staging removed) before the
+  live application is touched.
+
+### Added (privileged rollback extraction, 2026-11-21)
+- 9 safe-extraction regression tests (valid archive + venv/config/database
+  preservation, traversal, absolute member, symlink, hardlink, FIFO/device,
+  malformed archive with clean refusal, overwrite attempt against the live
+  tree, no-write-before-validation). Suite now **287 passing**; the portable
+  reproduction E2E exercises the full rollback through the new extractor.
+- `scripts/verify_tar_vuln.py` — isolated reproduction that demonstrates the
+  escape against the pre-fix helper and the refusal against the fixed one.
+
+### Fixed (deployment corrections + security verification, 2026-11-21)
+- **Root helper privilege boundary (confirmed + fixed):** the manifest is written
+  by the service user, and the helper previously trusted the manifest's `app_dir`,
+  `unit` and rollback `config_path` — a writable manifest could redirect privileged
+  operations to another tree (incl. via `..` traversal), restart another systemd
+  unit, or copy backup content over an arbitrary root file. The helper now acts on
+  ROOT-CONTROLLED authorized values only (`/etc/aurora-update-authorized.json`,
+  root-owned 0644, written by install.sh for non-default installs; built-in
+  defaults otherwise). Every manifest path is canonicalized (symlinks resolved)
+  BEFORE comparison; foreign destinations, traversal, unexpected unit names and
+  non-subset keep-lists are refused — identically for install, rollback and
+  validate. A test-only env override exists; the systemd unit sets no environment.
+- **Installer ownership syntax (confirmed + fixed):** `install -m 0755 root:root …`
+  parsed `root:root` as an extra SOURCE and aborted the whole installer under
+  `set -e` (GNU install takes ownership via `-o/-g`). Now
+  `install -m 0755 -o root -g root …`; syntax verified in an isolated environment.
+- **Rollback activation conditions (confirmed + fixed):** systemd conditions are
+  ANDed; the pipe symbol marks a TRIGGERING condition, and triggering conditions
+  are ORed among themselves but ANDed with every regular condition (systemd.unit(5)).
+  The previous mix (one regular + one triggering) started the unit only when BOTH
+  manifests existed — a rollback-only request could never activate. Both conditions
+  are now triggering; install-only / rollback-only activate, both-pending is
+  refused by the helper, none-pending is an inert exit-0.
+- Helper `apply` now refuses suspicious states cleanly (exit 65 with a journal
+  line) instead of an unhandled traceback; `_move_back` never leaves a
+  half-restored tree when a restored backup contains its own copy of a carried
+  directory.
+
+### Added (deployment corrections + security verification, 2026-11-21)
+- `tests/test_update_helper.py` — 13 security and activation-scenario tests run
+  against the helper as a subprocess: foreign app_dir refused, `..` traversal
+  refused, symlink escapes refused (app_dir and staging), foreign unit refused,
+  foreign rollback config_path refused, staging outside the authorized data dir
+  refused, unwritable authorization file refused, invalid manifests cannot trigger
+  changes, and the four activation scenarios (install-only, rollback-only,
+  both-pending refused, none inert). Suite now **278 passing**.
+- The portable reproduction E2E now pins the helper's authority explicitly and
+  adds a negative check (a manifest claiming a foreign app_dir is refused).
+
 ### Added
+- **Reliable reminders & notifications**: natural-language requests ("Remind me to
+  check the servers in 15 minutes", bare durations like "15 minutes" too) execute
+  model-free and deterministically; a dashboard notification bell shows active
+  reminders and timer decisions (Done / Snooze / Dismiss controls preserved and
+  extended); a gentle two-tone browser chime (WebAudio, no audio files) fires on
+  delivery; optional voice announcements of reminders and timers
+  (`notifications.voice_announce` + `voice.server_speak`); models that answer with
+  tool-call JSON as plain text have that call executed instead of leaking JSON
+  into the chat — a reminder request always runs, and Aurora only confirms after
+  it is actually stored.
+- **Timer interaction flow**: timers (`kind=timer`, created via "set a timer for …"
+  in chat, the dashboard form or the model's tool) ask exactly once — "⏱️ Your timer
+  is up. Would you like me to repeat it?" — with Repeat (original duration restored),
+  Snooze (bring-back; original duration kept for a later repeat) and Dismiss as
+  buttons and as spoken answers ("repeat", "five more minutes", "dismiss"); several
+  timers stay independent; unanswered decisions persist across restarts, are shown in
+  the bell, are never re-prompted and never auto-restart.
+- **Optional hands-free mode**: opt-in "Hey Aurora" listening in the dashboard —
+  browser-local energy VAD (AudioWorklet) captures an utterance only after speech is
+  detected and sends it to the EXISTING local STT endpoint (no new dependencies);
+  wake phrase + command ("Hey Aurora, remind me to…") or wake phrase then a follow-up
+  utterance; visible listening indicator; push-to-speak unchanged.
+- **One-button software update** (`aurora/updater.py` + Settings → Software update):
+  checks the configured repo's latest stable release, shows version + release notes,
+  asks permission, backs up the app tree + config + an online SQLite snapshot, then
+  downloads (interrupt-safe `.part` + zip CRC verification) and swaps the tree,
+  carrying `venv/`, `.git/`, `config.yaml` and `aurora.env` across; restart via
+  passwordless `sudo systemctl` on systemd deployments or in-place `os.execv`
+  elsewhere; on startup the new version verifies itself, records the outcome in the
+  update history and posts "I'm back! The update worked…"; rollback restores the
+  previous tree (never an older database). Corrupt or interrupted downloads abort
+  before anything is replaced. Never a blind `git pull`; never executes downloaded code.
+- **Update awareness**: Aurora's prompt carries a short software-state block (version,
+  update availability, last upgrade outcome) so she can talk naturally about her own
+  state; the last five upgrade records surface in `/api/status` and Settings.
+- Live end-to-end verification scripts: `scripts/verify_reminders_e2e.py` (real server,
+  real waits: chat → store → SSE delivery → bell → repeat/snooze/dismiss → restart
+  persistence) and `scripts/verify_update_e2e.py` (real server + local fake-GitHub:
+  check → install → restart → verify → rollback → corrupt-download refusal).
+- `Database.backup_to()` (online SQLite snapshot) and the `update.api_base` config key
+  (GitHub Enterprise / Gitea compatible).
+
+### Fixed
+- Time parsing: bare durations ("15 minutes", "2 hours 30 mins", "for 5 minutes")
+  now parse the same as "in 15 minutes" everywhere — chat, dashboard form, API.
+- Reminder data quality: greetings/test noise ("hi", "null", blanks) are rejected at
+  the store — the single choke point every creation path flows through — so junk
+  rows can no longer be stored; the Reminders table also guards its rendering.
+- Timer snooze: a fired (delivered) one-shot timer can be brought back via the new
+  `ReminderStore.bring_back()` (plain `snooze()` still only covers active statuses);
+  re-firing a snoozed timer keeps its ORIGINAL duration for repeats.
+- Updater restart: the script path is resolved at startup and the process chdirs to
+  the new tree before `execv` (the cwd is swapped out from under the running process),
+  so an update restart works after the tree swap.
+- Voice announcements are awaited by the delivery paths (previously fire-and-forget,
+  an utterance could be cut off when the turn ended first).
+
+### Fixed (updater hardening — Portable deployment)
+- **Portable systemd permissions (confirmed + fixed):** under the installed unit
+  (`ProtectSystem=strict` + `NoNewPrivileges=true`) the updater could not write
+  `/opt/aurora-companion` at all and could not elevate — `apply()` failed at the swap
+  step on every Portable install. It now runs in an **assisted mode**: backup,
+  download and staging happen inside the writable data directory, and a strictly
+  validated manifest is handed to the new `aurora-update-helper` (root-only, fixed
+  script) via the one-shot `aurora-update.service`, which the dashboard may start
+  through a narrowly scoped polkit rule (start `aurora-update.service` only — no
+  other unit, no other verb). Without polkit, the dashboard shows the exact manual
+  command with the release already staged, verified and backed up.
+- **Rollback destroyed the virtualenv (confirmed + fixed):** the backup archive
+  excludes `venv/` and `.git/` by design, but the restore recreated the tree without
+  carrying them — a rollback left Aurora unable to restart. Local state (`venv`,
+  `.git`, `config.yaml`, `aurora.env`) is now carried aside before the restore and
+  moved back afterwards, in both direct and helper modes.
+- Backups now store normalized modes (dirs 750 / files 644): a backup captured while
+  the tree was read-only must stay extractable and runnable afterwards.
+- The helper consumes its manifest after applying it, so a later rollback cannot
+  collide with the old install manifest; both manifests pending is refused for human
+  review.
+- `restart_soon()` no longer depends on a (possibly absent or externally managed)
+  asyncio event loop — the delayed `execv` restart runs on a daemon thread.
+- Helper manifest validation refuses path escapes: staging and backup must resolve
+  inside the service-writable data directory.
+
+### Added (updater hardening — Portable deployment)
+- `deploy/aurora-update-helper` (validate / install / rollback / apply),
+  `deploy/aurora-update.service` (oneshot root helper) and
+  `deploy/aurora-update.polkit` (start-only authorization for the service user);
+  `deploy/install.sh` installs all three.
+- `scripts/verify_portable_update_e2e.py` — reproduces the Portable restrictions at
+  the permission level (the sandbox has no systemd, so this is a faithful
+  reproduction of the filesystem effect, **not** a Portable deployment test):
+  read-only apply → staged manifest (nothing touched) → helper install with
+  venv/git/config/env carried → restart → verification → rollback with the venv
+  usable → restart → data intact. **28/28 checks passed**; the run found and fixed
+  the helper's missing carry directory, the manifest-consumption bug and the
+  unwritable-backup bug.
+- Updater unit tests grew to 13 (carry-across install, venv-preserving rollback,
+  rollback after an interrupted update, read-only staging, helper manifest
+  validation incl. path-escape refusal); suite now **265 passing**.
+- Docs: `docs/PORTABLE_DEPLOY.md §3b` (assisted updates on Portable) and a
+  GitHub-release packaging note that `Aurora-Companion.zip` is REQUIRED for
+  one-button updates (a tag-only release cannot be installed by the dashboard).
+
+### Added (previous work)
 - GitHub release package: rewritten README with genuine dashboard screenshots
   (captured from the fictional demo database), conceptual logo + social-preview
   artwork, `docs/GITHUB_RELEASE.md`, `CONTRIBUTING.md`, an extended `.gitignore`,

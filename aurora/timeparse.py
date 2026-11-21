@@ -111,10 +111,22 @@ def parse_when(text: str, now_epoch: float, default_hour: int = 9,
             return None
         return dt.timestamp()
 
-    # "in N minutes/hours/..." — relative offset.
+    # "in N minutes/hours/..." — relative offset. Bare durations ("15 minutes",
+    # "2 hours 30 mins", "for 5 minutes") parse the same way, so both phrasings
+    # work everywhere (chat, dashboard form, API).
     inm = IN_RE.search(text)
+    segment = None
     if inm and "at" not in text:
         segment = inm.group(1)
+    else:
+        bare = re.sub(r"^\s*for\s+", "", text).strip()
+        if bare:
+            residue = re.sub(
+                r"\b(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?"
+                r"|a|an|the|few|and|half)\b|\d+", "", bare)
+            if not residue.strip(" .,"):  # only duration words + digits remain
+                segment = bare
+    if segment:
         for word, amount in _IN_WORD_AMOUNTS.items():
             segment = re.sub(rf"\b{word}\b", str(amount), segment)
         delta = timedelta(0)

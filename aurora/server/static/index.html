@@ -77,12 +77,34 @@ button.ghost:disabled{opacity:.45;cursor:not-allowed}
 }
 #chatlog::-webkit-scrollbar,#tabs::-webkit-scrollbar{width:8px;height:8px}
 #chatlog::-webkit-scrollbar-thumb,#tabs::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+/* notification bell + timer decisions + hands-free indicator */
+.bellwrap{position:relative;margin-left:auto}
+button.bell{position:relative;padding:.25rem .5rem}
+.bellcount{position:absolute;top:-6px;right:-6px;background:var(--accent,#8b7bff);color:#1a1030;
+  border-radius:50%;font-size:.68rem;min-width:1.15em;padding:.05em .25em;text-align:center;font-weight:700}
+.belldrop{position:absolute;right:0;top:120%;min-width:300px;max-width:360px;max-height:60vh;overflow:auto;
+  background:var(--panel,#14151c);border:1px solid var(--border,#2a2b36);border-radius:10px;padding:.6rem;z-index:50;
+  box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.belldrop .alertrow{display:flex;gap:.4rem;align-items:center;justify-content:space-between;
+  padding:.4rem 0;border-bottom:1px solid var(--border,#2a2b36)}
+.belldrop .alertrow:last-child{border-bottom:0}
+.listening{color:#ffb84d;font-size:.8rem;animation:pulse 1.6s infinite}
+.timerbtns{display:flex;gap:.4rem;margin-top:.45rem;flex-wrap:wrap}
+.updatenote{white-space:pre-wrap;max-height:180px;overflow:auto;background:rgba(255,255,255,.04);
+  border-radius:8px;padding:.5rem}
 </style>
 </head>
 <body>
 <header>
   <h1>☉ Aurora</h1>
   <span class="status" id="statusline">connecting…</span>
+  <span id="listening-indicator" class="listening" hidden>● listening</span>
+  <div class="bellwrap">
+    <button class="ghost bell" id="btn-bell" title="Notifications">🔔<span id="bell-count" class="bellcount" hidden>0</span></button>
+    <div class="belldrop" id="belldrop" hidden>
+      <div id="bell-alerts" class="small"></div>
+    </div>
+  </div>
 </header>
 <nav id="tabs">
   <button data-tab="chat" class="active">Chat</button>
@@ -113,6 +135,7 @@ button.ghost:disabled{opacity:.45;cursor:not-allowed}
       </form>
       <div class="row" id="voicerow" style="margin-top:.5rem">
         <span class="small" id="voiceline" style="flex:1"></span>
+        <label class="switch small"><input type="checkbox" id="cb-handsfree"> "Hey Aurora" hands-free</label>
         <label class="switch small"><input type="checkbox" id="cb-autospeak"> speak replies</label>
         <button class="ghost" id="btn-speak-last" title="Speak the latest reply">🔊 Speak last</button>
       </div>
@@ -253,6 +276,22 @@ button.ghost:disabled{opacity:.45;cursor:not-allowed}
         <button class="ghost" onclick="testVoice()">Test voice</button>
       </div>
       <p class="small" id="voice-info">Voice ids are discovered live from the adapter (GET /v1/models); selecting one stores it in Aurora's config.</p>
+      <h3>Notifications</h3>
+      <div class="row">
+        <label class="switch small"><input type="checkbox" id="cb-chime"> gentle chime on reminders &amp; timers</label>
+        <label class="switch small"><input type="checkbox" id="cb-announce"> speak notifications (needs server_speak + TTS)</label>
+      </div>
+      <p class="small">The chime plays in this browser (no audio files); "speak" announces reminders and timers through Aurora's configured voice.</p>
+      <h3>Software update</h3>
+      <div class="kv" id="update-kv"></div>
+      <div class="row">
+        <button class="ghost" onclick="checkForUpdate()">Check for updates</button>
+        <button class="primary" id="btn-update-install" hidden onclick="installUpdate()">Download &amp; install</button>
+        <button class="ghost" id="btn-update-restart" hidden onclick="restartAurora()">Restart now</button>
+        <button class="ghost" id="btn-update-rollback" hidden onclick="rollbackUpdate()">Roll back</button>
+      </div>
+      <p class="small" id="update-note">Updates are checked against the GitHub repository configured under <code>update.repo</code>. Aurora always asks before installing, backs up first, and can roll back.</p>
+      <pre class="updatenote" id="update-notes" hidden></pre>
       <h3>Access token (LAN)</h3>
       <div class="row">
         <input id="set-token" placeholder="auth token (leave empty if none)" style="flex:1;min-width:200px">
@@ -294,7 +333,7 @@ document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   b.classList.add('active'); $('#tab-'+b.dataset.tab).classList.add('active');
   const loaders = {memory:loadMemory, reminders:loadReminders, persona:loadPersona,
     proactive:loadProactive, permissions:loadPermissions, people:loadPeople,
-    settings:()=>{ loadSettings(); loadVoices(); }};
+    settings:()=>{ loadSettings(); loadVoices(); loadUpdateSection(); }};
   if (loaders[b.dataset.tab]) loaders[b.dataset.tab]();
 });
 
@@ -307,6 +346,25 @@ function addMsg(m){
   if (m.role==='user' && m.sender) src = `<span class="src">${m.sender}</span>`;
   div.textContent = m.content; div.insertAdjacentHTML('beforeend', src);
   div.dataset.id = m.id;
+  // a fired timer carries its decision — render Repeat / Snooze / Dismiss
+  const td = m.meta && m.meta.timer_decision;
+  if (td){
+    const row = document.createElement('div'); row.className='timerbtns';
+    const btn = (label, action, seconds) => { const b=document.createElement('button');
+      b.className = action==='repeat' ? 'primary' : 'ghost'; b.textContent = label;
+      b.onclick = async () => {
+        try{ await api(`/api/timers/${td.id}/${action}`,{method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({seconds: seconds||300})});
+          row.remove(); toast(label+' ✓'); loadAlerts(); loadReminders && loadReminders();
+        }catch(err){ toast('Error: '+err.message); } };
+      row.appendChild(b); };
+    btn('↻ Repeat', 'repeat');
+    btn('＋5 min', 'snooze', 300);
+    btn('Dismiss', 'dismiss');
+    div.appendChild(row);
+    row.dataset.timerId = td.id;
+  }
   $('#chatlog').appendChild(div);
   $('#chatlog').scrollTop = $('#chatlog').scrollHeight;
 }
@@ -340,7 +398,9 @@ es.onmessage = ev => {
       const existing = document.querySelector(`#chatlog .msg[data-id="${d.message.id}"]`);
       if(!existing){ addMsg(d.message); if(d.message.role==='assistant'){ loadStatus();
         if (AUTO_SPEAK && d.message.source !== 'system') speakText(d.message.content); } }
-    } else if(d.type==='reminder_due'){ toast('⏰ Reminder: '+d.text); loadReminders&&loadReminders(); }
+    } else if(d.type==='reminder_due'){ chime(); toast('⏰ Reminder: '+d.text); loadAlerts(); loadReminders&&loadReminders(); }
+    else if(d.type==='timer_due'){ chime(true); toast('⏱️ '+d.text+' — timer is up'); loadAlerts(); loadReminders&&loadReminders(); }
+    else if(d.type==='timers_changed'){ loadAlerts(); }
     else if(d.type==='tool'){ toast('tool: '+d.name); }
   }catch(e){}
 };
@@ -422,17 +482,20 @@ async function addFact(){
 /* ---- reminders ---- */
 async function loadReminders(){
   const data = await api('/api/reminders');
-  const rows = data.reminders.map(r=>{
+  // guard against junk rows: never render a reminder without text (server
+  // validation blocks them at creation; this is the belt-and-braces view)
+  const rows = data.reminders.filter(r=>r && (r.text||'').trim()).map(r=>{
     const due = new Date(r.due_at*1000).toLocaleString();
     const badge = r.status==='waiting_ack'?` <span class="badge">awaiting ack (attempt ${r.attempts})</span>`:
       r.status==='snoozed'?' <span class="badge">snoozed</span>':
       r.repeat?' <span class="badge">recurring</span>':'';
     const btn = (label,action,seconds)=>`<button class="ghost" onclick="remAction('${r.id}','${action}'${seconds?','+seconds:''})">${label}</button>`;
-    return `<tr><td>${r.text}</td><td>${due}${badge}</td><td>${r.project||''}</td>
+    return `<tr><td>${r.text||''}</td><td>${due}${badge}</td><td>${r.project||''}</td>
       <td>${btn('Done','done')} ${btn('Snooze 10m','snooze',600)} ${btn('Cancel','cancel')}</td></tr>`;
   }).join('');
-  $('#rem-list').innerHTML = `<table><tr><th>Reminder</th><th>Due</th><th>Project</th><th></th></tr>${rows}</table>`
-    || '<p class="small">None scheduled.</p>';
+  $('#rem-list').innerHTML = rows
+    ? `<table><tr><th>Reminder</th><th>Due</th><th>Project</th><th></th></tr>${rows}</table>`
+    : '<p class="small">None scheduled.</p>';
   const del = await api('/api/reminders/deliveries');
   $('#rem-deliveries').innerHTML = del.deliveries.slice(-8).reverse().map(d=>
     `${fmtTime(d.ts)} — "${d.text}" (attempt ${d.attempts})`).join('<br>') || 'no deliveries yet';
@@ -683,6 +746,325 @@ async function testVoice(){
 
 loadChat(); loadStatus();
 setInterval(loadStatus, 30000);
+
+/* ============================================================
+   Notifications: gentle chime + bell (WebAudio, no audio files)
+   ============================================================ */
+let audioCtx = null;
+function chime(isTimer){
+  if (localStorage.getItem('aurora_chime_off') === '1') return;
+  if (LAST_STATUS && LAST_STATUS.notifications && LAST_STATUS.notifications.chime === false) return;
+  try{
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    // two soft sine notes with an exponential fade — gentle, not alarm-like
+    [[isTimer?659.25:523.25, 0.0], [isTimer?987.77:783.99, 0.18]].forEach(([freq, at]) => {
+      const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+      osc.type = 'sine'; osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, now+at);
+      gain.gain.exponentialRampToValueAtTime(0.14, now+at+0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now+at+0.9);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(now+at); osc.stop(now+at+1.0);
+    });
+  }catch(e){}
+}
+
+/* ---- notification bell ---- */
+const bellBtn = $('#btn-bell'), bellDrop = $('#belldrop');
+bellBtn.onclick = () => { bellDrop.hidden = !bellDrop.hidden; if(!bellDrop.hidden) loadAlerts(); };
+document.addEventListener('click', e => {
+  if (!bellDrop.hidden && !bellBtn.contains(e.target) && !bellDrop.contains(e.target))
+    bellDrop.hidden = true;
+});
+function alertRow(label, buttons){
+  const row = document.createElement('div'); row.className = 'alertrow';
+  const span = document.createElement('span'); span.textContent = label; span.style.flex='1';
+  row.appendChild(span);
+  (buttons||[]).forEach(([lbl, fn, cls]) => { const b=document.createElement('button');
+    b.className = cls||'ghost'; b.textContent = lbl; b.onclick = fn; row.appendChild(b); });
+  return row;
+}
+async function loadAlerts(){
+  try{
+    const a = await api('/api/alerts');
+    const count = a.count || 0;
+    $('#bell-count').hidden = count === 0;
+    $('#bell-count').textContent = count > 20 ? '20+' : count;
+    const box = $('#bell-alerts'); box.innerHTML = '';
+    // update-available entry
+    const up = LAST_STATUS && LAST_STATUS.update;
+    if (up && up.update_available){
+      box.appendChild(alertRow(`⬆️ Update ${up.latest_version} available (you: ${up.version})`,
+        [['Settings', () => { document.querySelector('[data-tab="settings"]').click(); }]]));
+    }
+    // timers awaiting an answer
+    Object.entries(a.pending_timers || {}).forEach(([id, t]) => {
+      const dur = t.duration ? ` (${fmtDur(t.duration)})` : '';
+      box.appendChild(alertRow(`⏱️ Timer${dur}: ${t.text}`, [
+        ['Repeat', () => timerApi(id,'repeat')], ['Snooze 5m', () => timerApi(id,'snooze')],
+        ['Dismiss', () => timerApi(id,'dismiss'), 'danger']]));
+    });
+    // active reminders
+    (a.active || []).filter(r => r.kind !== 'timer').forEach(r => {
+      box.appendChild(alertRow(`🔔 ${r.text} — ${fmtTime(r.due_at)}`, [
+        ['Done', () => reminderApi(r.id,'ack')], ['Snooze 10m', () => reminderApi(r.id,'snooze')]]));
+    });
+    if (!box.children.length) box.innerHTML = '<p class="small">All quiet — nothing pending.</p>';
+  }catch(e){}
+}
+async function timerApi(id, action){
+  try{ await api(`/api/timers/${id}/${action}`, {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({seconds:300})});
+    toast(action+' ✓'); loadAlerts(); loadReminders && loadReminders();
+    document.querySelectorAll(`.timerbtns[data-timer-id="${id}"]`).forEach(el=>el.remove());
+  }catch(err){ toast('Error: '+err.message); }
+}
+async function reminderApi(id, action){
+  try{ await api(`/api/reminders/${id}/${action==='ack'?'ack':action}`,
+    {method:'POST', headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({seconds: action==='snooze'?600:0})});
+    loadAlerts(); loadReminders && loadReminders();
+  }catch(err){ toast('Error: '+err.message); }
+}
+loadAlerts(); setInterval(loadAlerts, 60000);
+
+/* ---- hands-free "Hey Aurora" (opt-in; browser-local energy VAD +
+        the EXISTING whisper STT endpoint — no new dependencies) ---- */
+let wake = {stream:null, ctx:null, node:null, on:false, armed:false, armedTimer:null, active:false, chunks:[]};
+const WAKE_RE = /^(?:hey|ok|okay|hi)[,.\s]*aurora[,.!?\s]*(.*)$/i;
+function setListening(state){
+  const el = $('#listening-indicator');
+  el.hidden = !wake.on;
+  el.textContent = state === 'armed' ? '● listening — say "Hey Aurora"' : '● listening for your command…';
+}
+$('#cb-handsfree').checked = localStorage.getItem('aurora_handsfree') === '1';
+$('#cb-handsfree').onchange = e => {
+  localStorage.setItem('aurora_handsfree', e.target.checked ? '1' : '0');
+  e.target.checked ? startWake() : stopWake();
+};
+async function startWake(){
+  if (!navigator.mediaDevices || window.isSecureContext !== true){
+    toast('Hands-free needs HTTPS or localhost (secure context) — push-to-talk still works there too');
+    $('#cb-handsfree').checked = false;
+    localStorage.setItem('aurora_handsfree', '0');
+    return;
+  }
+  try{
+    wake.stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    wake.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = wake.ctx.createMediaStreamSource(wake.stream);
+    // energy VAD in the browser: RMS threshold + hangover; nothing is sent
+    // anywhere until speech is detected, and recordings go only to YOUR
+    // local STT endpoint — exactly like the mic button, just hands-free
+    await wake.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([`
+      class VAD extends AudioWorkletProcessor {
+        process(inputs){ const ch = inputs[0][0]; if(!ch) return true;
+          let sum=0; for(let i=0;i<ch.length;i++) sum += ch[i]*ch[i];
+          this.port.postMessage(Math.sqrt(sum/ch.length)); return true; } }
+      registerProcessor('vad', VAD);`], {type:'application/javascript'})));
+    wake.node = new AudioWorkletNode(wake.ctx, 'vad');
+    const buf = wake.ctx.createBufferSource();
+    let noiseFloor = 0.008, speechMs = 0, silenceMs = 0, collecting = false;
+    let collector = null;
+    wake.node.port.onmessage = ev => {
+      const rms = ev.data;
+      noiseFloor = Math.max(0.004, noiseFloor*0.999 + rms*0.001);
+      const speaking = rms > Math.max(0.016, noiseFloor*2.8);
+      if (speaking) speechMs += 128; else { speechMs = 0; silenceMs += 128; }
+      if (!collecting && speaking){
+        collecting = true; silenceMs = 0; wake.chunks = [];
+        collector = wake.ctx.createScriptProcessor(4096, 1, 1);
+        collector.onaudioprocess = e2 => {
+          if (collecting) wake.chunks.push(new Float32Array(e2.inputBuffer.getChannelData(0)));
+        };
+        src.connect(collector); collector.connect(wake.ctx.destination);
+        setListening('command');
+      }
+      if (collecting && (silenceMs > 1200 || wake.chunks.length > 250)){ // ~8s cap
+        collecting = false;
+        try{ src.disconnect(collector); collector.disconnect(); }catch(e){}
+        finishUtterance();
+      }
+    };
+    src.connect(wake.node);
+    wake.node.connect(wake.ctx.destination); // worklet needs a destination to pump
+    wake.on = true; setListening('armed');
+  }catch(e){ toast('Hands-free unavailable: '+e.message); $('#cb-handsfree').checked = false; }
+}
+function stopWake(){
+  wake.on = false;
+  try{ wake.stream && wake.stream.getTracks().forEach(t=>t.stop()); wake.ctx && wake.ctx.close(); }catch(e){}
+  $('#listening-indicator').hidden = true;
+}
+function floatToWav(chunks, sampleRate){
+  const n = chunks.reduce((a,c)=>a+c.length, 0);
+  const buf = new ArrayBuffer(44 + n*2), view = new DataView(buf);
+  const wstr = (o,s)=>{for(let i=0;i<s.length;i++)view.setUint8(o+i,s.charCodeAt(i));};
+  wstr(0,'RIFF'); view.setUint32(4,36+n*2,true); wstr(8,'WAVEfmt ');
+  view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true);
+  view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true);
+  view.setUint16(32,2,true); view.setUint16(34,16,true); wstr(36,'data');
+  view.setUint32(40,n*2,true);
+  let off = 44;
+  for(const c of chunks) for(let i=0;i<c.length;i++,off+=2)
+    view.setInt16(off, Math.max(-1,Math.min(1,c[i]))*0x7fff, true);
+  return new Blob([view], {type:'audio/wav'});
+}
+async function finishUtterance(){
+  const chunks = wake.chunks; wake.chunks = [];
+  if (!chunks.length) return;
+  const rate = wake.ctx ? wake.ctx.sampleRate : 48000;
+  const blob = floatToWav(chunks, rate);
+  const fd = new FormData(); fd.append('file', blob, 'speech.wav');
+  try{
+    const r = await api('/api/voice/stt', {method:'POST', body: fd});
+    const text = (r.text || '').trim();
+    if (!text) { setListening('armed'); return; }
+    const m = text.match(WAKE_RE);
+    if (m){
+      const command = m[1].trim();
+      if (command){
+        chime(); await submitTranscript(command);
+      } else {
+        wake.armed = true; setListening('command');
+        clearTimeout(wake.armedTimer);
+        wake.armedTimer = setTimeout(()=>{ wake.armed=false; setListening('armed'); }, 10000);
+        toast('Listening…');
+      }
+    } else if (wake.armed){
+      wake.armed = false; clearTimeout(wake.armedTimer);
+      await submitTranscript(text);
+    }
+  }catch(err){ toast('STT error: '+err.message); }
+  setListening('armed');
+}
+async function submitTranscript(text){
+  try{
+    const msg = await api('/api/chat', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:text})});
+    addMsg(msg);
+  }catch(err){ toast('Error: '+err.message); }
+}
+if ($('#cb-handsfree').checked) startWake();
+
+/* ---- notification preferences ---- */
+function initNotifToggles(){
+  $('#cb-chime').checked = localStorage.getItem('aurora_chime_off') !== '1';
+  $('#cb-chime').onchange = e => {
+    localStorage.setItem('aurora_chime_off', e.target.checked ? '0' : '1');
+    toast(e.target.checked ? 'Chime on' : 'Chime muted in this browser');
+  };
+  $('#cb-announce').checked = localStorage.getItem('aurora_announce') !== '0';
+  $('#cb-announce').onchange = async e => {
+    localStorage.setItem('aurora_announce', e.target.checked ? '1' : '0');
+    await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({'notifications.voice_announce': e.target.checked})});
+    toast(e.target.checked ? 'Aurora will speak notifications (restart to apply)' : 'Voice notifications off');
+    loadStatus();
+  };
+}
+initNotifToggles();
+
+/* ---- software update (user-approved, backup-first, rollback-able) ---- */
+let LAST_CHECK = null;
+function renderUpdate(s){
+  const kv = $('#update-kv');
+  kv.innerHTML = `<div class="k">Installed</div><div>v${s.version}`
+    + (s.commit ? ` (commit ${s.commit})` : '') + `</div>`
+    + `<div class="k">Latest stable</div><div>${s.latest_version || (LAST_CHECK && LAST_CHECK.latest_version) || 'not checked'}</div>`
+    + `<div class="k">Repo</div><div>${s.repo || 'not configured (update.repo)'}</div>`;
+  $('#btn-update-restart').hidden = !(s.pending || (LAST_CHECK && LAST_CHECK._installed));
+  $('#btn-update-rollback').hidden = !(s.history || []).some(h => h.result === 'ok' || h.result === 'failed');
+  const avail = (LAST_CHECK && LAST_CHECK.available) || s.update_available;
+  $('#btn-update-install').hidden = !avail;
+  if (LAST_CHECK && LAST_CHECK.notes){
+    $('#update-notes').hidden = false;
+    $('#update-notes').textContent = LAST_CHECK.notes;
+  }
+}
+async function checkForUpdate(){
+  toast('Checking…');
+  try{ LAST_CHECK = await api('/api/update/check', {method:'POST'}); }
+  catch(err){ toast('Check failed: '+err.message); return; }
+  if (LAST_CHECK.error){ toast('Update check: '+LAST_CHECK.error); }
+  else if (LAST_CHECK.available){ toast(`Update available: ${LAST_CHECK.latest_version}`); }
+  else { toast(`You are up to date (v${LAST_CHECK.current_version})`); }
+  renderUpdate(LAST_STATUS && LAST_STATUS.update ? LAST_STATUS.update : {});
+}
+async function installUpdate(){
+  const c = LAST_CHECK || {};
+  if (!confirm(`Install update ${c.latest_version}?` +
+      '\n\nAurora will back up the current installation, download and verify the release, then ask to restart. Memories and settings are kept.')) return;
+  toast('Backing up + installing… (this can take a minute)');
+  $('#btn-update-install').disabled = true;
+  try{
+    const r = await api('/api/update/apply', {method:'POST'});
+    if (r.status === 'installed'){
+      toast(`Installed v${r.new_version} — restart to switch`);
+      $('#btn-update-restart').hidden = false;
+      const note = $('#update-note');
+      note.textContent = 'Installed. Restart Aurora to run the new version; she will verify it on startup and offer a rollback if anything is wrong.';
+    } else if (r.status === 'installing'){
+      toast(`Installing v${r.new_version} via the system helper — Aurora restarts automatically`);
+      pollForRestart();
+    } else if (r.status === 'staged_manual'){
+      toast('Staged — needs one manual command (no polkit/systemd access)');
+      const note = $('#update-note');
+      note.hidden = false;
+      note.textContent = 'Staged and verified in the data directory. The service cannot write its own app folder '
+        + '(systemd ProtectSystem) and cannot elevate (NoNewPrivileges), so finish with:\n\n'
+        + r.manual_command + '\n\nThe helper carries the venv, git history and config across and restarts Aurora. Memories are kept.';
+    }
+  }catch(err){ toast('Install failed, nothing was changed: '+err.message); }
+  $('#btn-update-install').disabled = false;
+  loadStatus();
+}
+function pollForRestart(){
+  const poll = setInterval(async () => {
+    try{ await api('/api/status'); clearInterval(poll); location.reload(); }catch(e){}
+  }, 2000);
+}
+async function restartAurora(){
+  if (!confirm('Restart Aurora now?')) return;
+  try{
+    const r = await api('/api/update/restart', {method:'POST'});
+    if (r.status === 'manual_restart_required'){
+      toast('Manual restart: ' + r.command);
+    } else {
+      toast('Restarting… page reloads when Aurora is back');
+      const poll = setInterval(async () => {
+        try{ await api('/api/status'); clearInterval(poll); location.reload(); }catch(e){}
+      }, 2000);
+    }
+  }catch(err){ toast('Restart failed: '+err.message); }
+}
+async function rollbackUpdate(){
+  if (!confirm('Roll back to the previous version? Your memories, reminders and settings are kept; only the application files revert.')) return;
+  try{
+    const r = await api('/api/update/rollback', {method:'POST'});
+    if (r.status === 'rolled_back'){
+      toast('Rolled back to v'+r.version+' — restarting');
+      pollForRestart();
+    } else if (r.status === 'installing'){
+      toast('Rolling back via the system helper — Aurora restarts automatically');
+      pollForRestart();
+    } else if (r.status === 'staged_manual'){
+      toast('Rollback staged — needs one manual command');
+      const note = $('#update-note');
+      note.hidden = false;
+      note.textContent = 'Rollback prepared and verified in the data directory. Finish with:\n\n'
+        + r.manual_command + '\n\nThe venv, git history and config are carried across; memories are kept.';
+    }
+  }catch(err){ toast('Rollback failed: '+err.message); }
+}
+async function loadUpdateSection(){
+  try{
+    const s = await api('/api/update/status');
+    renderUpdate(s);
+  }catch(e){}
+}
+
 </script>
 </body>
 </html>

@@ -2,6 +2,56 @@
 
 ## Completed
 
+0c. **Privileged rollback extraction correction (2026-11-21).** Confirmed and
+reproduced the unsafe `extractall()` in the rollback path (traversal member
+escaped outside the authorized data dir, absolute member written at its
+absolute location, malicious tree replaced the app — helper exit 0). Replaced
+with `_safe_extract`: explicit allowlist validated before any write (no
+absolute/`..` members, strictly-inside-staging resolution, symlinks/hardlinks/
+devices/FIFOs rejected, normalized 0755/0644 modes), clean refusal (exit 2,
+staging removed) for malformed/suspicious archives, live app untouched on
+failure. 9 new regression tests → suite 287; portable E2E 29/29 runs the
+rollback through the new extractor; `scripts/verify_tar_vuln.py` documents
+pre-fix escape / post-fix refusal.
+
+0b. **Deployment corrections + security verification (2026-11-21).** All three
+review findings confirmed and fixed: (1) root helper now pins app_dir/data_dir/
+unit/config_path to root-controlled authorized values with full path
+canonicalization — a writable manifest can no longer redirect privileged
+operations, restart foreign units or overwrite foreign config files (13 new
+security tests in `tests/test_update_helper.py`); (2) installer ownership fixed
+(`install -m 0755 -o root -g root`, previously an invalid positional that aborted
+the installer under `set -e`) and install.sh writes the authorization file;
+(3) activation conditions fixed per systemd.unit(5) triggering-condition
+semantics (rollback-only requests previously never activated the helper unit).
+Suite 265 → 278; E2Es: portable 29/29, updater 18/18, reminders 19/19.
+
+0a. **Updater hardening round (2026-11-21).** Both review findings confirmed and
+fixed: (1) on Portable (`ProtectSystem=strict` + `NoNewPrivileges`) the updater
+could not touch the app tree and could not elevate — new assisted mode stages in
+the data dir and hands a validated manifest to `aurora-update-helper` (root-only)
+via `aurora-update.service` + a polkit rule authorizing only that unit; (2) rollback
+recreated the tree without the excluded `venv/`/`.git/` — local state is now
+carried aside and moved back. Bonus fixes found by the new
+`scripts/verify_portable_update_e2e.py` (28/28: DAC-level reproduction, honest
+about no systemd): helper carry dir, manifest consumption, backup mode
+normalization, event-loop-independent `restart_soon`. Suite 261 → 265.
+
+0. **Upgrade milestone (2026-11-21) — reminders/timers/notifications, hands-free,
+   one-button updater, update awareness.** Repository audit first: HEAD at the
+   release-prep commit, 103 mode-only (644→755) working-tree changes and an empty
+   `tools/` dir — **no content changes existed to preserve or conflict with**; modes
+   normalized in the final commit. Then: deterministic NL reminder/timer fast-paths
+   (model-free, bare durations included), timer `kind` + repeat/snooze/dismiss flow
+   ("Your timer is up. Would you like me to repeat it?", speak-once, multi-timer,
+   restart-persistent, never auto-restart), defensive execution of tool-call JSON
+   leaked as text, notification bell + WebAudio chime + optional voice announce,
+   opt-in "Hey Aurora" hands-free over the existing STT, `aurora/updater.py` with
+   backup/verify/swap/carry/restart/verify/rollback (+ Settings UI + `/api/update/*`),
+   software-state prompt block + update history, junk-reminder rejection at the store,
+   `Database.backup_to`, additive schema migration. Tests 232 → 261; two live E2E
+   scripts added (`scripts/verify_reminders_e2e.py`, `scripts/verify_update_e2e.py`
+   — updater cycle 18/18 PASS); updater restart bugs found and fixed by the E2E.
 1. **Inspection** — both repos cloned to `/home/z/my-project/repos/` (not modified); deep
    inventories produced (architecture, storage schemas, algorithms, dependencies, reuse
    assessments for both).

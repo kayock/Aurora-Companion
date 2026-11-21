@@ -1,27 +1,15 @@
 <div align="center">
 
-<img src="docs/assets/aurora-social-preview.png" alt="Aurora Companion — original aurora-themed artwork" width="100%" />
-
-<br />
-
-<img src="docs/assets/aurora-logo.png" alt="Aurora Companion logo" width="100" />
+<img src="docs/assets/aurora-logo.png" alt="Aurora Companion logo" width="120"/>
 
 # Aurora Companion
 
-### A local AI companion that remembers, evolves, and speaks up.
+**One cohesive, locally powered AI companion — evolving personality, persistent memory,
+and its own initiative, on your own machine.**
 
-*One evolving personality. One persistent memory. A voice of its own.*
-
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](requirements.txt)
-[![License AGPLv3](https://img.shields.io/badge/License-AGPLv3-9467E4)](LICENSE)
-[![Status Experimental](https://img.shields.io/badge/Status-Experimental-A78BFA)](docs/LIMITATIONS.md)
-[![Tests 232 passing](https://img.shields.io/badge/Tests-232%20passing-2F9D87)](docs/TEST_RESULTS.md)
-
-[**Explore the dashboard**](#screenshots) · [**Quick start**](#try-it-in-60-seconds-no-model-needed) · [**Portable deployment**](#ubuntu-portable-deployment) · [**Architecture**](#architecture) · [**Limitations**](#known-limitations)
+*Conceptual artwork — the logo above is original project art, not an application screenshot.*
 
 </div>
-
-> **Artwork note:** The banner and logo are original conceptual artwork. All interface screenshots below were captured from the running application with a fictional demonstration database.
 
 ---
 
@@ -75,14 +63,35 @@ More views: [privacy permissions](docs/screenshots/dashboard-privacy.png) ·
   means no duplicate proactive messages from competing subsystems.
 - **General-purpose reminders** — one-time, recurring, and nag-until-acknowledged; snooze,
   dismiss, acknowledge; project tags; missed-while-offline recovery; scheduling that never
-  needs the language model to be loaded.
+  needs the language model to be loaded. Natural language works model-free: "Remind me to
+  check the servers in 15 minutes" (bare "15 minutes" too) always executes, and a model
+  that leaks tool-call JSON as text still gets its reminder scheduled — never shown as JSON.
+- **Timers with a conversation** — "Set a timer for 5 minutes" creates a timer that asks
+  once when it fires ("Your timer is up. Would you like me to repeat it?") with Repeat
+  (original duration), Snooze and Dismiss buttons, or spoken answers ("repeat", "five more
+  minutes", "dismiss"). Several timers stay independent; pending questions survive restarts
+  and are never re-prompted or auto-restarted.
+- **Notification bell & chime** — a header bell shows active reminders and timer decisions;
+  a gentle two-tone chime (WebAudio, no audio files) plays on delivery; optional
+  server-side voice announcements of reminders and timers through Aurora's configured TTS.
 - **Voice interaction (opt-in)** — browser push-to-talk microphone input, transcribed
   locally through an existing [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper)
   service; text-to-speech through a local Kokoro server, an existing OpenAI-compatible
   speech adapter (e.g. the Kayock Voice adapter on the same host) with
   live voice-id discovery and dashboard voice selection, or an optional cloud edge-tts.
-  Nothing records without the browser permission *and* Aurora's own privacy permission —
-  there is no continuous listening or wake-word mode.
+  Nothing records without the browser permission *and* Aurora's own privacy permission.
+  An additional opt-in "Hey Aurora" hands-free mode uses a browser-local energy VAD and
+  the same local STT endpoint — clearly indicated while listening, off by default,
+  no new dependencies — and push-to-talk keeps working unchanged.
+- **One-button software update (opt-in)** — Settings → Software update checks the
+  configured GitHub repo's latest stable release, shows version and release notes, and —
+  only after explicit confirmation — backs up the app tree, config and a database
+  snapshot, downloads and verifies the release zip, swaps the application tree (venv,
+  git, config carried across), restarts, verifies itself and announces the outcome;
+  rollback is one button. Interrupted or corrupt downloads abort before anything changes;
+  there is no blind `git pull` and downloaded code is never executed. Aurora knows her
+  version and upgrade history and can talk about them naturally; updates are never
+  installed automatically.
 - **Local language models** — any OpenAI-compatible server (LM Studio, llama.cpp
   `llama-server`, Ollama, vLLM, …). Aurora holds no model itself and makes only short
   request bursts.

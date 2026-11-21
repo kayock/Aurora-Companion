@@ -90,9 +90,12 @@ def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
                 return "error: that time is already in the past"
             repeat = parse_repeat(when_words)
             follow_up = bool(args.get("follow_up", False))
+            kind = "timer" if "timer" in (text + " " + when_words).lower() else ""
             rem = reminders.add(
                 text, due, repeat=repeat, follow_up=follow_up,
                 project=str(args.get("project", "")), person=person, source="assistant_tool",
+                kind=kind,
+                duration=int(round(due - clock.now())) if kind == "timer" else None,
             )
             ctx.get("on_change", (lambda: None))()
             rep = f", repeating {describe_repeat(repeat)}" if repeat else ""
