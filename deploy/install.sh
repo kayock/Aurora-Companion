@@ -148,7 +148,9 @@ echo "-- verifying layout as '$AURORA_USER' --"
 VERIFY_OK=1
 as_service() { runuser -u "$AURORA_USER" -- "$@"; }
 check() {  # check <description> <command...>
-  if as_service "$@"; then echo "   ok   $1"; else echo "   FAIL $1"; VERIFY_OK=0; fi
+  local description="$1"
+  shift
+  if as_service "$@"; then echo "   ok   $description"; else echo "   FAIL $description"; VERIFY_OK=0; fi
 }
 check "app tree readable ($AURORA_HOME)" test -r "$AURORA_HOME/run.py"
 check "seed persona readable" test -r "$AURORA_HOME/personas/default.json"

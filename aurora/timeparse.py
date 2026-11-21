@@ -313,7 +313,14 @@ def friendly(epoch: float, now_epoch: float) -> str:
     if seconds < 60:
         span = "moments"
     elif seconds < 3600:
-        span = f"{int(seconds // 60)} minute(s)"
+        minutes = int(seconds // 60)
+        remaining = int(round(seconds - minutes * 60))
+        if remaining == 60:
+            minutes += 1
+            remaining = 0
+        span = f"{minutes} minute(s)"
+        if remaining:
+            span += f" {remaining} second(s)"
     elif seconds < 86400:
         span = (f"{seconds / 3600:.1f} hour(s)" if seconds < 7200
                 else f"{int(seconds // 3600)} hour(s)")
