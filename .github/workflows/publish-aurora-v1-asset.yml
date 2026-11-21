@@ -1,0 +1,52 @@
+name: Attach Aurora v1.0.0 ZIP to GitHub Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-aurora-v1-asset.yml
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    if: github.repository == 'kayock/Aurora-Companion'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact v1.0.0 release commit
+        uses: actions/checkout@v4
+        with:
+          ref: v1.0.0
+          persist-credentials: false
+      - name: Build updater-compatible ZIP from the tagged source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, zipfile
+          excluded = {".github/workflows/tests.yml", "SECURITY.md", "tests/test_config_paths.py"}
+          files = [name.decode() for name in subprocess.check_output(
+              ["git", "ls-files", "-z"]).split(b"\0") if name]
+          files = sorted(f for f in files if f not in excluded)
+          assert len(files) == 120, f"Unexpected release file count: {len(files)}"
+          assert "deploy/aurora-update-helper" in files
+          assert "aurora/updater.py" in files
+          for f in files:
+              path = pathlib.Path(f)
+              assert path.is_file() and not path.is_symlink(), f"Bad package member: {f}"
+              assert not any(part in ("..", ".git") for part in path.parts)
+          with zipfile.ZipFile("Aurora-Companion.zip", "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for f in files:
+                  z.write(f, "aurora-companion/" + f)
+          with zipfile.ZipFile("Aurora-Companion.zip") as z:
+              assert z.testzip() is None
+              assert len(z.namelist()) == len(files)
+          import hashlib
+          print("ZIP SHA256:", hashlib.sha256(open("Aurora-Companion.zip", "rb").read()).hexdigest())
+          PY
+      - name: Attach to the existing GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload v1.0.0 Aurora-Companion.zip --repo kayock/Aurora-Companion --clobber
+          gh release view v1.0.0 --repo kayock/Aurora-Companion --json assets --jq '.assets[].name' | grep -x 'Aurora-Companion.zip'
