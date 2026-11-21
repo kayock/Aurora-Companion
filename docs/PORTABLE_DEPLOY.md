@@ -97,8 +97,9 @@ OnCalendar=*-*-* 03:30:00
 Persistent=true
 ```
 
-Restore: stop the service, run the restore hint printed by `backup.sh` (executes the SQL
-dump into a fresh `aurora.db`), start the service.
+Restore: stop the service, gunzip the snapshot into a new `aurora.db` (it is a SQLite
+database image, not a SQL text dump), replace the live file, then start the service.
+The script prints the exact commands.
 
 ### 3b. One-button updates on Portable
 

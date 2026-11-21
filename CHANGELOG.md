@@ -3,6 +3,16 @@
 All notable changes to Aurora Companion. The project follows semver-ish versioning
 (see docs/GITHUB_RELEASE.md §6). Dates are UTC.
 
+## [1.0.8] — 2026-11-21
+
+### Fixed
+- **Database backup.** `deploy/backup.sh` joined `sqlite3.iterdump()` strings
+  with a bytes separator, so it crashed and never took the online snapshot
+  its header described. It now uses SQLite's backup API, checks integrity,
+  gzip-compresses the image, and leaves no partial file when it fails.
+  The gzip is mode 0600. Restore is `gunzip` onto a database file, not a SQL
+  text import.
+
 ## [1.0.7] — 2026-11-21
 
 ### Changed
