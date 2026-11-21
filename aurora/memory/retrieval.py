@@ -9,6 +9,8 @@ BM25+vector) — under one cap so the prompt never bloats.
 
 from __future__ import annotations
 
+import re
+
 from ..clock import Clock
 from ..providers.embeddings import EmbeddingClient
 from ..storage import Database
@@ -60,6 +62,7 @@ class MemoryRetriever:
     async def retrieve(self, query: str, subject: str = "owner", limit: int | None = None) -> list[Fact]:
         limit = limit or self.max_facts
         picked: dict[str, Fact] = {}
+        q = (query or "").strip()
 
         # Slot 1: pinned facts always travel.
         for f in self.store.active_facts(subject):
@@ -73,13 +76,21 @@ class MemoryRetriever:
         if budget == 0:
             return list(picked.values())[:limit]
 
+        # Directive / greeting turns gain nothing from FTS+embed and the
+        # embedding round-trip is pure latency — skip slot 3 for those.
+        if (not q
+                or re.match(
+                    r"^(say|reply|respond|only|just|ok|okay|yes|no|hi+|hello|hey)\b",
+                    q, re.I)):
+            return list(picked.values())[:limit]
+
         # Slot 3: query-relevant facts, FTS5 + lexical + optional vector, RRF-merged.
-        fts_hits = self.store.facts_fts(query, subject=subject, limit=10)
-        lexical_hits = self.store.facts_about(query, subject=subject, limit=10)
+        fts_hits = self.store.facts_fts(q, subject=subject, limit=10)
+        lexical_hits = self.store.facts_about(q, subject=subject, limit=10)
         ranked_lists: list[list[str]] = [[f.id for f in fts_hits], [f.id for f in lexical_hits]]
         seen = {f.id for f in fts_hits}
         vec_candidates = list(fts_hits) + [f for f in lexical_hits if f.id not in seen]
-        vec_ranking = await self._semantic_rank(query, vec_candidates)
+        vec_ranking = await self._semantic_rank(q, vec_candidates)
         if vec_ranking:
             ranked_lists.append(vec_ranking)
 

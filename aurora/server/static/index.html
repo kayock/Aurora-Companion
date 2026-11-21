@@ -446,7 +446,10 @@ $('#btn-unfocus').onclick = async () => { await api('/api/proactive/focus',{meth
 const es = new EventSource('/api/events' + (TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : ''));
 es.onmessage = ev => {
   try{ const d = JSON.parse(ev.data);
-    if(d.type==='delta'){
+    if(d.type==='stream_reset'){
+      // Backend discarded a tool-call-shaped stream — clear the bubble.
+      clearStreaming();
+    } else if(d.type==='delta'){
       // Stream into a dedicated bubble's .msg-body only — never rewrite
       // the whole .msg (that flattened the "chat" source label into text).
       const el = ensureStreamBubble();
@@ -951,12 +954,18 @@ loadAlerts(); setInterval(loadAlerts, 60000);
 /* Hands-free is energy-VAD + regex on STT text — NOT a true wake-word model.
    Limitations: false triggers on similar speech; ambient noise; no barge-in DNN. */
 let wake = {stream:null, ctx:null, node:null, sink:null, on:false, armed:false, armedTimer:null,
-            busy:false, muted:false, chunks:[], collector:null, src:null};
-const WAKE_RE = /^(?:hey|ok|okay|hi)[,.\s]*aurora[,.!?\s]*(.*)$/i;
-function setListening(state){
+            busy:false, muted:false, chunks:[], queue:[], collector:null, src:null, lastDiag:''};
+// Tolerate common Whisper misspellings of "Aurora" so wake+command in one
+// utterance is not silently dropped.
+const WAKE_RE = /^(?:hey|ok|okay|hi)[,.\s]*(?:aurora|arora|orora|auroura|aurorra)[,.!?\s]*(.*)$/i;
+function setListening(state, detail){
   const el = $('#listening-indicator');
   el.hidden = !wake.on;
-  el.textContent = state === 'armed' ? '● listening — say "Hey Aurora"' : '● listening for your command…';
+  let label = state === 'armed' ? '● listening — say "Hey Aurora"' : '● listening for your command…';
+  if (state === 'busy') label = '● processing speech…';
+  if (detail) label += ' — ' + detail;
+  el.textContent = label;
+  if (detail) wake.lastDiag = detail;
 }
 $('#cb-handsfree').checked = localStorage.getItem('aurora_handsfree') === '1';
 $('#cb-handsfree').onchange = e => {
@@ -1015,7 +1024,7 @@ async function startWake(){
   }catch(e){ toast('Hands-free unavailable: '+e.message); $('#cb-handsfree').checked = false; stopWake(); }
 }
 function stopWake(){
-  wake.on = false; wake.busy = false; wake.armed = false; wake.chunks = [];
+  wake.on = false; wake.busy = false; wake.armed = false; wake.chunks = []; wake.queue = [];
   clearTimeout(wake.armedTimer);
   try{ if (wake.collector){ wake.src && wake.src.disconnect(wake.collector); wake.collector.disconnect(); } }catch(e){}
   try{ wake.node && wake.node.disconnect(); wake.sink && wake.sink.disconnect(); }catch(e){}
@@ -1039,37 +1048,68 @@ function floatToWav(chunks, sampleRate){
   return new Blob([view], {type:'audio/wav'});
 }
 async function finishUtterance(){
-  if (wake.busy || wake.muted) { wake.chunks = []; return; }
+  if (wake.muted) { wake.chunks = []; return; }
+  // While STT is in flight, queue this utterance instead of dropping it —
+  // otherwise "Hey Aurora" + command spoken with a short pause loses the
+  // command while busy=true.
+  if (wake.busy) {
+    if (wake.chunks.length) wake.queue.push(wake.chunks.slice());
+    wake.chunks = [];
+    return;
+  }
   const chunks = wake.chunks; wake.chunks = [];
-  if (!chunks.length) { if (wake.on) setListening('armed'); return; }
+  if (!chunks.length) {
+    if (wake.queue.length) { wake.chunks = wake.queue.shift(); return finishUtterance(); }
+    if (wake.on) setListening(wake.armed ? 'command' : 'armed');
+    return;
+  }
   wake.busy = true;
+  setListening('busy');
   const rate = wake.ctx ? wake.ctx.sampleRate : 48000;
   const blob = floatToWav(chunks, rate);
   const fd = new FormData(); fd.append('file', blob, 'speech.wav');
   try{
     const r = await api('/api/voice/stt', {method:'POST', body: fd});
     const text = (r.text || '').trim();
-    if (!text) { setListening('armed'); return; }
+    if (!text) {
+      setListening(wake.armed ? 'command' : 'armed', 'no speech recognized');
+      toast('Didn’t catch that — try again');
+      return;
+    }
     // Collapse pathological stutter transcripts from feedback/noise
     const cleaned = text.replace(/\b(\w+)(?:[,.\s]+\1\b){2,}/gi, '$1');
     const m = cleaned.match(WAKE_RE);
     if (m){
       const command = m[1].trim();
       if (command){
+        wake.armed = false; clearTimeout(wake.armedTimer);
+        setListening('busy', 'wake+command');
         chime(); await submitTranscript(command);
       } else {
-        wake.armed = true; setListening('command');
+        wake.armed = true; setListening('command', 'wake heard — speak your request');
         clearTimeout(wake.armedTimer);
-        wake.armedTimer = setTimeout(()=>{ wake.armed=false; setListening('armed'); }, 10000);
-        toast('Listening…');
+        wake.armedTimer = setTimeout(()=>{ wake.armed=false; setListening('armed'); }, 12000);
+        toast('Listening for your request…');
       }
     } else if (wake.armed){
       wake.armed = false; clearTimeout(wake.armedTimer);
+      setListening('busy', 'command');
       await submitTranscript(cleaned);
+    } else {
+      // Idle non-wake speech: ignore ambient loops, but show why.
+      const preview = cleaned.length > 48 ? cleaned.slice(0,48)+'…' : cleaned;
+      setListening('armed', 'ignored (no wake): '+preview);
     }
-    // else: ignore non-wake speech while idle (prevents ambient loops)
-  }catch(err){ toast('STT error: '+err.message); }
-  finally { wake.busy = false; if (wake.on) setListening(wake.armed ? 'command' : 'armed'); }
+  }catch(err){ toast('STT error: '+err.message); setListening('armed', 'STT error'); }
+  finally {
+    wake.busy = false;
+    if (wake.queue.length) {
+      wake.chunks = wake.queue.shift();
+      finishUtterance();
+      return;
+    }
+    if (wake.on) setListening(wake.armed ? 'command' : 'armed');
+  }
 }
 async function submitTranscript(text){
   try{

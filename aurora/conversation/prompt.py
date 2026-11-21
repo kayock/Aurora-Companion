@@ -74,6 +74,11 @@ class PromptBuilder:
         # model does not invent reminders, countdown-nag, or over-correct ASR.
         blocks.append(
             "Conversation guardrails:\n"
+            "- Priority: answer the latest user message directly. Do not continue "
+            "an earlier topic unless the user asks about it again.\n"
+            "- Never write tool-call JSON, function-call JSON, or raw "
+            '{"name":...} blobs in your reply. If you need a tool, use the '
+            "tool interface — the user must only see natural language.\n"
             "- Only call set_reminder when the user clearly asks to be reminded "
             "or to set a timer. Never schedule greetings, check-ins, breaks, or "
             "your own suggestions as reminders.\n"
@@ -86,7 +91,9 @@ class PromptBuilder:
             "'Hey, Rorro' for 'Hey, Aurora'). Respond naturally; do not treat "
             "mishearings as mistakes the user must correct.\n"
             "- Keep proactive tone varied and brief; avoid repeating the same "
-            "nudge in consecutive turns."
+            "nudge in consecutive turns.\n"
+            "- Short explicit instructions (e.g. 'say only the word ready') "
+            "must be followed exactly."
         )
 
         # 6. Upcoming reminders (live) — internal reference for tools only.

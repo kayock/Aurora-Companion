@@ -127,6 +127,7 @@ class ConversationManager:
         self._proactive_cb = None
         self._voice = None  # set by the app when voice is enabled
         self._streaming = False
+        self.last_timing: dict[str, Any] = {}
         # Timer interaction state: pending "Your timer is up — repeat it?"
         # decisions keyed by reminder id. Persisted in the store so a pending
         # question survives a restart; the prompt is asked exactly once per
@@ -185,8 +186,16 @@ class ConversationManager:
         rows = self.db.query(
             "SELECT * FROM messages ORDER BY id DESC LIMIT ?", (limit,)
         )
-        return [{"role": r["role"], "content": r["content"], "id": r["id"]}
-                for r in reversed(rows) if r["role"] in ("user", "assistant")]
+        out = []
+        for r in reversed(rows):
+            if r["role"] not in ("user", "assistant"):
+                continue
+            # Never re-feed leaked tool-call JSON into the model context —
+            # that is the main source of topic stickiness after a bad turn.
+            if r["role"] == "assistant" and self._looks_like_tool_json(r["content"]):
+                continue
+            out.append({"role": r["role"], "content": r["content"], "id": r["id"]})
+        return out
 
     def _summary_block(self) -> str:
         summary = self.db.get_meta("conversation.summary")
@@ -373,10 +382,10 @@ class ConversationManager:
     async def _build_messages(self, text: str, person: str,
                               proactive_context: str | None = None,
                               include_user_text: bool = True) -> list[dict]:
-        recent_user = " ".join(
-            m["content"] for m in self._window()[-4:] if m["role"] == "user") or text
+        # Memory retrieval must track THIS turn — concatenating recent user
+        # turns caused Saturn/reminder bleed into unrelated requests.
         system = await self.prompt_builder.build_system(
-            now_epoch=self.clock.now(), query=recent_user, subject=person,
+            now_epoch=self.clock.now(), query=text or "", subject=person,
             extra_blocks=[self._summary_block()] if self._summary_block() else None,
             proactive_context=proactive_context,
         )
@@ -416,42 +425,76 @@ class ConversationManager:
                     "Ollama). Reminders and memory keep working without it.")
         if self.compute_guard is not None:
             self.compute_guard.note_foreground()  # user turns preempt background AI
+        t_build0 = _time.perf_counter()
         messages = await self._build_messages(text, person, proactive_context)
+        build_ms = (_time.perf_counter() - t_build0) * 1000.0
         max_rounds = int(self.config.get("conversation.max_tool_rounds", 3))
-        on_delta = self._make_delta_emitter()
+        gate = self._DeltaGate(self._emit)
+        on_delta = gate.as_callback()
         self._streaming = True
+        self.last_timing = {"prompt_build_ms": round(build_ms, 1), "model_ms": [], "tool_ms": []}
         try:
             for round_no in range(max_rounds):
                 specs = self.tools.specs() if self.chat_provider.supports_tools() else None
+                gate.reset_for_round(hold_possible_tools=bool(specs))
+                t_model0 = _time.perf_counter()
                 try:
                     result = await self.chat_provider.chat(messages, tools=specs, on_delta=on_delta)
                 except ProviderError:
                     if specs:
                         # server choked on tools: rebuild clean prompt and retry once without them
                         messages = await self._build_messages(text, person, proactive_context)
+                        gate.reset_for_round(hold_possible_tools=False)
                         result = await self.chat_provider.chat(messages, tools=None, on_delta=on_delta)
                         specs = None
                     else:
                         raise
+                self.last_timing["model_ms"].append(
+                    round((_time.perf_counter() - t_model0) * 1000.0, 1))
                 if not result.tool_calls:
                     # Some models answer with the tool call as plain JSON text
                     # instead of using the tool_calls field. Detect that shape
                     # and EXECUTE it — a reminder request must actually run,
                     # never surface as JSON in the conversation.
-                    embedded = self._extract_embedded_tool_call(result.text) if specs else None
+                    known = set(self.tools.names())
+                    embedded = (self._extract_embedded_tool_call(result.text, known)
+                                if specs or known else None)
+                    if embedded is None and self._looks_like_tool_json(result.text):
+                        # Malformed tool JSON: never show it as a chat reply.
+                        await gate.discard()
+                        return (prefix + "I tried to use an internal tool just then but "
+                                "couldn't complete it cleanly. Please say that another way.")
                     if embedded is not None:
+                        await gate.discard()
                         name, raw_args = embedded
+                        t_tool0 = _time.perf_counter()
                         args = parse_tool_arguments(raw_args)
                         output = await self.tools.call(name, args,
-                                                       {"person": person, "tz_offset_minutes": 0})
+                                                       {"person": person, "tz_offset_minutes": 0,
+                                                        "on_change": (lambda: None)})
+                        self.last_timing["tool_ms"].append(
+                            round((_time.perf_counter() - t_tool0) * 1000.0, 1))
                         await self._emit({"type": "tool", "name": name, "arguments": args,
                                           "output": output, "recovered_from_text": True})
-                        messages.append({"role": "assistant", "content": result.text})
-                        messages.append({"role": "user",
-                                         "content": f"[tool {name} result]\n{output}"})
-                        text = "continue with the tool results"
+                        # OpenAI-shaped follow-up — do not re-inject the leaked JSON.
+                        messages.append({
+                            "role": "assistant", "content": "",
+                            "tool_calls": [{
+                                "id": f"call_{round_no}_0", "type": "function",
+                                "function": {"name": name, "arguments": raw_args},
+                            }],
+                        })
+                        messages.append({"role": "tool",
+                                         "tool_call_id": f"call_{round_no}_0",
+                                         "content": str(output)})
                         continue
-                    return prefix + self._clean(result.text)
+                    await gate.flush_if_held()
+                    cleaned = self._clean(result.text)
+                    if self._looks_like_tool_json(cleaned):
+                        return (prefix + "I tried to use an internal tool just then but "
+                                "couldn't complete it cleanly. Please say that another way.")
+                    return prefix + cleaned
+                await gate.discard()
                 oai_calls = []
                 for i, c in enumerate(result.tool_calls):
                     args = c.arguments if isinstance(c.arguments, str) else json.dumps(c.arguments)
@@ -463,53 +506,153 @@ class ConversationManager:
                 messages.append({"role": "assistant", "content": result.text or "",
                                  "tool_calls": oai_calls})
                 for i, call in enumerate(result.tool_calls):
+                    t_tool0 = _time.perf_counter()
                     args = parse_tool_arguments(call.arguments)
-                    ctx = {"person": person, "tz_offset_minutes": 0}
+                    ctx = {"person": person, "tz_offset_minutes": 0,
+                           "on_change": (lambda: None)}
                     output = await self.tools.call(call.name, args, ctx)
+                    self.last_timing["tool_ms"].append(
+                        round((_time.perf_counter() - t_tool0) * 1000.0, 1))
                     await self._emit({"type": "tool", "name": call.name, "arguments": args,
                                       "output": output})
                     messages.append({"role": "tool",
                                      "tool_call_id": f"call_{round_no}_{i}",
                                      "content": str(output)})
-                text = "continue with the tool results"
-            return prefix + self._clean(result.text)
+            await gate.flush_if_held()
+            cleaned = self._clean(result.text)
+            if self._looks_like_tool_json(cleaned):
+                return (prefix + "I tried to use an internal tool just then but "
+                        "couldn't complete it cleanly. Please say that another way.")
+            return prefix + cleaned
         finally:
             self._streaming = False
 
+    class _DeltaGate:
+        """Hold stream deltas that look like tool-call JSON so they never
+        paint into the chat bubble; flush promptly for ordinary prose."""
+
+        def __init__(self, emit) -> None:
+            self._emit = emit
+            self._buf: list[str] = []
+            self._holding = False
+            self._suppressed = False
+
+        def reset_for_round(self, hold_possible_tools: bool) -> None:
+            self._buf.clear()
+            self._holding = hold_possible_tools
+            self._suppressed = False
+
+        def as_callback(self):
+            def _cb(piece: str):
+                asyncio.ensure_future(self.feed(piece))
+            return _cb
+
+        async def feed(self, piece: str) -> None:
+            if self._suppressed or not piece:
+                return
+            if not self._holding:
+                await self._emit({"type": "delta", "text": piece})
+                return
+            self._buf.append(piece)
+            joined = "".join(self._buf).lstrip()
+            if not joined:
+                return
+            # Tool JSON always starts with '{'; ordinary replies do not.
+            if joined.startswith("{"):
+                return
+            self._holding = False
+            for p in self._buf:
+                await self._emit({"type": "delta", "text": p})
+            self._buf.clear()
+
+        async def discard(self) -> None:
+            self._suppressed = True
+            self._buf.clear()
+            await self._emit({"type": "stream_reset"})
+
+        async def flush_if_held(self) -> None:
+            if self._suppressed or not self._buf:
+                self._holding = False
+                return
+            self._holding = False
+            for p in self._buf:
+                await self._emit({"type": "delta", "text": p})
+            self._buf.clear()
+
     @staticmethod
-    def _extract_embedded_tool_call(text: str) -> "tuple[str, Any] | None":
+    def _repair_tool_json(text: str) -> str:
+        raw = (text or "").strip()
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I).strip()
+        # llama3.2 often emits `"parameters{"text":...}` or `"parameters {"text"`
+        # (opening brace before the key is closed) / missing colons.
+        raw = re.sub(r'"(parameters|arguments)\s*\{\s*"', r'"\1": {"', raw)
+        raw = re.sub(r'"(parameters|arguments)"\s*\{\s*"', r'"\1": {"', raw)
+        raw = re.sub(r'"(parameters|arguments)"\s*\{', r'"\1": {', raw)
+        raw = re.sub(r'"(parameters|arguments)"\s+"', r'"\1": "', raw)
+        return raw
+
+    @classmethod
+    def _looks_like_tool_json(cls, text: str) -> bool:
+        raw = cls._repair_tool_json(text)
+        if not raw.startswith("{"):
+            return False
+        if re.search(r'"name"\s*:\s*"(set_reminder|cancel_reminder|snooze_reminder|'
+                     r'list_reminders|recall_facts|remember_fact|forget_fact|'
+                     r'update_fact|get_time)"', raw):
+            return True
+        if '"parameters"' in raw or '"arguments"' in raw:
+            if any(k in raw for k in ("set_reminder", "recall_facts", "remember_fact",
+                                      "list_reminders", "get_time", "cancel_reminder")):
+                return True
+        return False
+
+    @classmethod
+    def _extract_embedded_tool_call(
+        cls, text: str, known_tools: "set[str] | None" = None,
+    ) -> "tuple[str, Any] | None":
         """Find a tool call that a model emitted as plain text, e.g.
         '{"name": "set_reminder", "arguments": {...}}' (with or without a
         ```json fence). Returns (name, raw_arguments) when the name matches a
-        registered tool, else None."""
-        raw = (text or "").strip()
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I).strip()
-        if not raw.startswith("{") or not raw.endswith("}"):
+        registered tool, else None. Tolerates common llama3.2 malformations."""
+        raw = cls._repair_tool_json(text)
+        if not raw.startswith("{"):
             return None
+        data = None
         try:
             data = json.loads(raw)
         except Exception:
-            return None
+            # Extract name + object args even when the blob is not strict JSON.
+            m = re.search(
+                r'"name"\s*:\s*"([a-zA-Z0-9_]+)"\s*,\s*"(?:arguments|parameters)"\s*:\s*(\{.*\})\s*\}?\s*$',
+                raw, flags=re.S)
+            if not m:
+                return None
+            name, args_blob = m.group(1), m.group(2)
+            try:
+                json.loads(args_blob)
+            except Exception:
+                return None
+            if known_tools is not None and name not in known_tools:
+                return None
+            return name, args_blob
         if not isinstance(data, dict):
             return None
         name = data.get("name") or data.get("tool") or data.get("tool_name")
         if not isinstance(name, str) or not name.strip():
             return None
+        name = name.strip()
+        if known_tools is not None and name not in known_tools:
+            return None
         raw_args = data.get("arguments", data.get("parameters", {}))
         if not isinstance(raw_args, str):  # parse_tool_arguments expects JSON text
             raw_args = json.dumps(raw_args)
-        return name.strip(), raw_args
+        return name, raw_args
 
     @staticmethod
     def _clean(text: str) -> str:
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I)
         text = re.sub(r"^<think>.*", "", text, flags=re.S | re.I)
         return text.strip()
-
-    def _make_delta_emitter(self):
-        async def on_delta(piece: str):
-            await self._emit({"type": "delta", "text": piece})
-        return lambda piece: asyncio.ensure_future(on_delta(piece))
 
     # ------------------------------------------------------------------ finishing turns
     async def _finish_assistant_reply(self, text: str, person: str, user_msg_id: int,

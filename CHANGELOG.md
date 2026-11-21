@@ -3,6 +3,21 @@
 All notable changes to Aurora Companion. The project follows semver-ish versioning
 (see docs/GITHUB_RELEASE.md §6). Dates are UTC.
 
+## [1.0.3] — 2026-11-21
+
+### Fixed
+- Tool-call JSON leaked into chat when `llama3.2:3b` emitted plain-text
+  `{"name":…,"parameters":…}` (often with a missing colon). Aurora now repairs
+  common malformations, executes valid embedded tool calls, suppresses their
+  stream deltas (`stream_reset`), and never persists tool JSON as a reply.
+- Conversation stickiness: memory retrieval uses the current turn only; leaked
+  tool-JSON assistant rows are filtered from the model window; prompt prioritizes
+  the latest user request and exact short instructions.
+- Hands-free: utterances are queued while STT is busy (no longer drop the
+  command after "Hey Aurora"); softer wake matching for Whisper misspellings;
+  listening indicator shows why an utterance was ignored.
+- Latency: skip FTS/embedding retrieval for directive/greeting turns.
+
 ## [1.0.2] — 2026-11-21
 
 ### Fixed
