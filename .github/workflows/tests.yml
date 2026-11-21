@@ -29,4 +29,4 @@ jobs:
       - name: Verify deploy script syntax
         run: bash -n deploy/*.sh
       - name: Run tests
-        run: python -m pytest tests/ -q -x --tb=short
+        run: python -m pytest tests/ -q

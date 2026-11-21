@@ -116,3 +116,8 @@ def test_describe_and_guard():
 def test_friendly():
     assert "minute" in friendly(NOW + 300, NOW)
     assert "ago" in friendly(NOW - 7200, NOW)
+
+
+def test_friendly_preserves_timer_seconds():
+    """A 90-second timer must not be described as just one minute."""
+    assert "1 minute(s) 30 second(s)" in friendly(NOW + 90, NOW)
