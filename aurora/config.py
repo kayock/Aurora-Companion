@@ -164,12 +164,12 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 class Config:
-    def __init__(self, data: dict[str, Any], path: Path | None = None) -> None:
+    def __init__(self, data: dict[str, Any], path: Path | str | None = None) -> None:
         self._data = _deep_merge(DEFAULTS, data)
-        self.path = path
+        self.path = Path(path) if path is not None else None
 
     @classmethod
-    def load(cls, path: Path | None) -> "Config":
+    def load(cls, path: Path | str | None) -> "Config":
         if path is None:
             return cls({})
         with open(path, "r", encoding="utf-8") as fh:
