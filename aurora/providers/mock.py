@@ -38,9 +38,9 @@ class MockProvider(ChatProvider):
     @staticmethod
     def _last_user_text(messages: list[dict]) -> str:
         for msg in reversed(messages):
-            if msg.get("role") == "user":
+            if msg.get("role") in ("user", "tool"):
                 content = msg.get("content")
-                if isinstance(content, str):
+                if isinstance(content, str) and content.strip():
                     return content
         return ""
 

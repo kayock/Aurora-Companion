@@ -35,6 +35,7 @@ h3{font-size:.92rem;color:var(--dim);margin:1rem 0 .4rem;text-transform:uppercas
 .msg{max-width:85%;padding:.55rem .8rem;border-radius:12px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
 .msg.user{align-self:flex-end;background:#2a3b5c}
 .msg.assistant{align-self:flex-start;background:var(--panel2);border:1px solid var(--line)}
+.msg .msg-body{white-space:pre-wrap;}
 .msg .src{display:block;font-size:.68rem;color:var(--dim);margin-top:.3rem}
 #chatbar{display:flex;gap:.5rem;margin-top:.8rem}
 #chatbar input{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--text);
@@ -337,15 +338,55 @@ document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   if (loaders[b.dataset.tab]) loaders[b.dataset.tab]();
 });
 
-/* ---- chat ---- */
+/* ---- chat ----
+   Message DOM: content lives in .msg-body; labels in .src.
+   NEVER assign to msg.textContent after labels exist — that was stitching
+   the word "chat" into streamed replies and duplicating bubbles. */
+let streamingEl = null;
+function msgBody(el){ return el && el.querySelector ? el.querySelector('.msg-body') : null; }
+function clearStreaming(){
+  if (streamingEl && streamingEl.isConnected) streamingEl.remove();
+  streamingEl = null;
+}
+function ensureStreamBubble(){
+  if (streamingEl && streamingEl.isConnected) return streamingEl;
+  const div = document.createElement('div');
+  div.className = 'msg assistant streaming';
+  div.dataset.id = 'streaming';
+  const body = document.createElement('div'); body.className = 'msg-body';
+  div.appendChild(body);
+  const src = document.createElement('span'); src.className = 'src'; src.textContent = '…';
+  div.appendChild(src);
+  $('#chatlog').appendChild(div);
+  streamingEl = div;
+  return div;
+}
+function upsertMsg(m){
+  if (!m || m.id == null) return null;
+  clearStreaming();
+  const existing = document.querySelector(`#chatlog .msg[data-id="${m.id}"]`);
+  if (existing){
+    const body = msgBody(existing);
+    if (body) body.textContent = m.content || '';
+    return existing;
+  }
+  return addMsg(m);
+}
 function addMsg(m){
   const div = document.createElement('div');
   div.className = 'msg ' + m.role;
-  let src = '';
-  if (m.role==='assistant') src = `<span class="src">${m.source||'chat'}</span>`;
-  if (m.role==='user' && m.sender) src = `<span class="src">${m.sender}</span>`;
-  div.textContent = m.content; div.insertAdjacentHTML('beforeend', src);
   div.dataset.id = m.id;
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  body.textContent = m.content || '';
+  div.appendChild(body);
+  if (m.role==='assistant'){
+    const src = document.createElement('span'); src.className = 'src';
+    src.textContent = m.source||'chat'; div.appendChild(src);
+  } else if (m.role==='user' && m.sender){
+    const src = document.createElement('span'); src.className = 'src';
+    src.textContent = m.sender; div.appendChild(src);
+  }
   // a fired timer carries its decision — render Repeat / Snooze / Dismiss
   const td = m.meta && m.meta.timer_decision;
   if (td){
@@ -367,16 +408,19 @@ function addMsg(m){
   }
   $('#chatlog').appendChild(div);
   $('#chatlog').scrollTop = $('#chatlog').scrollHeight;
+  return div;
 }
 async function loadChat(){
-  try{ const h = await api('/api/history?limit=80'); $('#chatlog').innerHTML=''; h.messages.forEach(addMsg);}catch(e){}
+  try{ const h = await api('/api/history?limit=80'); clearStreaming(); $('#chatlog').innerHTML=''; h.messages.forEach(addMsg);}catch(e){}
 }
 $('#chatbar').onsubmit = async e => {
   e.preventDefault();
   const input = $('#chatinput'); const text = input.value.trim();
   if(!text) return; input.value='';
   try{ const msg = await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({message:text})}); addMsg(msg); }
+    body:JSON.stringify({message:text})});
+    // SSE usually already rendered this by id — upsert, do not double-append
+    upsertMsg(msg); }
   catch(err){ toast('Error: '+err.message); }
 };
 $('#btn-focus').onclick = async () => { await api('/api/proactive/focus',{method:'POST',
@@ -391,13 +435,20 @@ const es = new EventSource('/api/events' + (TOKEN ? `?token=${encodeURIComponent
 es.onmessage = ev => {
   try{ const d = JSON.parse(ev.data);
     if(d.type==='delta'){
-      const last = [...document.querySelectorAll('#chatlog .msg.assistant')].pop();
-      if(last) last.textContent += d.text;
+      // Stream into a dedicated bubble's .msg-body only — never rewrite
+      // the whole .msg (that flattened the "chat" source label into text).
+      const el = ensureStreamBubble();
+      const body = msgBody(el);
+      if (body) body.textContent += (d.text || '');
       $('#chatlog').scrollTop = $('#chatlog').scrollHeight;
     } else if(d.type==='message'){
-      const existing = document.querySelector(`#chatlog .msg[data-id="${d.message.id}"]`);
-      if(!existing){ addMsg(d.message); if(d.message.role==='assistant'){ loadStatus();
-        if (AUTO_SPEAK && d.message.source !== 'system') speakText(d.message.content); } }
+      const wasNew = !document.querySelector(`#chatlog .msg[data-id="${d.message.id}"]`);
+      upsertMsg(d.message);
+      if(d.message.role==='assistant'){
+        loadStatus();
+        // Speak only once, when the final message first appears
+        if (wasNew && AUTO_SPEAK && d.message.source !== 'system') speakText(d.message.content);
+      }
     } else if(d.type==='reminder_due'){ chime(); toast('⏰ Reminder: '+d.text); loadAlerts(); loadReminders&&loadReminders(); }
     else if(d.type==='timer_due'){ chime(true); toast('⏱️ '+d.text+' — timer is up'); loadAlerts(); loadReminders&&loadReminders(); }
     else if(d.type==='timers_changed'){ loadAlerts(); }
@@ -678,14 +729,18 @@ $('#cb-autospeak').onchange = e => {
   localStorage.setItem('aurora_auto_speak', AUTO_SPEAK ? '1' : '0');
 };
 let audioQueue = [], playing = false;
+function setPlaybackMute(on){
+  // Prevent TTS → mic feedback into hands-free VAD/STT
+  if (typeof wake !== 'undefined') wake.muted = !!on;
+}
 function playQueue(){
-  if (playing || !audioQueue.length) return;
-  playing = true;
+  if (playing || !audioQueue.length) { if (!audioQueue.length) setPlaybackMute(false); return; }
+  playing = true; setPlaybackMute(true);
   const blob = audioQueue.shift();
   const audio = new Audio(URL.createObjectURL(blob));
   audio.onended = () => { URL.revokeObjectURL(audio.src); playing = false; playQueue(); };
   audio.onerror = () => { URL.revokeObjectURL(audio.src); playing = false; playQueue(); };
-  audio.play().catch(() => { playing = false; });
+  audio.play().catch(() => { playing = false; playQueue(); });
 }
 async function speakText(text, voice){
   if (!text || !text.trim()) return;
@@ -831,7 +886,10 @@ loadAlerts(); setInterval(loadAlerts, 60000);
 
 /* ---- hands-free "Hey Aurora" (opt-in; browser-local energy VAD +
         the EXISTING whisper STT endpoint — no new dependencies) ---- */
-let wake = {stream:null, ctx:null, node:null, on:false, armed:false, armedTimer:null, active:false, chunks:[]};
+/* Hands-free is energy-VAD + regex on STT text — NOT a true wake-word model.
+   Limitations: false triggers on similar speech; ambient noise; no barge-in DNN. */
+let wake = {stream:null, ctx:null, node:null, sink:null, on:false, armed:false, armedTimer:null,
+            busy:false, muted:false, chunks:[], collector:null, src:null};
 const WAKE_RE = /^(?:hey|ok|okay|hi)[,.\s]*aurora[,.!?\s]*(.*)$/i;
 function setListening(state){
   const el = $('#listening-indicator');
@@ -850,13 +908,14 @@ async function startWake(){
     localStorage.setItem('aurora_handsfree', '0');
     return;
   }
+  if (wake.on) return;
   try{
     wake.stream = await navigator.mediaDevices.getUserMedia({audio:true});
     wake.ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const src = wake.ctx.createMediaStreamSource(wake.stream);
-    // energy VAD in the browser: RMS threshold + hangover; nothing is sent
-    // anywhere until speech is detected, and recordings go only to YOUR
-    // local STT endpoint — exactly like the mic button, just hands-free
+    wake.src = wake.ctx.createMediaStreamSource(wake.stream);
+    // Silent sink — NEVER connect mic graph to speakers (that caused TTS feedback loops)
+    wake.sink = wake.ctx.createGain(); wake.sink.gain.value = 0;
+    wake.sink.connect(wake.ctx.destination);
     await wake.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([`
       class VAD extends AudioWorkletProcessor {
         process(inputs){ const ch = inputs[0][0]; if(!ch) return true;
@@ -864,37 +923,43 @@ async function startWake(){
           this.port.postMessage(Math.sqrt(sum/ch.length)); return true; } }
       registerProcessor('vad', VAD);`], {type:'application/javascript'})));
     wake.node = new AudioWorkletNode(wake.ctx, 'vad');
-    const buf = wake.ctx.createBufferSource();
     let noiseFloor = 0.008, speechMs = 0, silenceMs = 0, collecting = false;
-    let collector = null;
     wake.node.port.onmessage = ev => {
+      if (!wake.on || wake.muted || wake.busy || playing || audioQueue.length) return;
       const rms = ev.data;
       noiseFloor = Math.max(0.004, noiseFloor*0.999 + rms*0.001);
       const speaking = rms > Math.max(0.016, noiseFloor*2.8);
-      if (speaking) speechMs += 128; else { speechMs = 0; silenceMs += 128; }
-      if (!collecting && speaking){
+      if (speaking){ speechMs += 128; silenceMs = 0; } else { speechMs = 0; silenceMs += 128; }
+      if (!collecting && speaking && speechMs > 180){
         collecting = true; silenceMs = 0; wake.chunks = [];
-        collector = wake.ctx.createScriptProcessor(4096, 1, 1);
-        collector.onaudioprocess = e2 => {
-          if (collecting) wake.chunks.push(new Float32Array(e2.inputBuffer.getChannelData(0)));
+        try{ if (wake.collector){ wake.src.disconnect(wake.collector); wake.collector.disconnect(); } }catch(e){}
+        wake.collector = wake.ctx.createScriptProcessor(4096, 1, 1);
+        wake.collector.onaudioprocess = e2 => {
+          if (collecting && !wake.muted) wake.chunks.push(new Float32Array(e2.inputBuffer.getChannelData(0)));
         };
-        src.connect(collector); collector.connect(wake.ctx.destination);
+        wake.src.connect(wake.collector); wake.collector.connect(wake.sink);
         setListening('command');
       }
       if (collecting && (silenceMs > 1200 || wake.chunks.length > 250)){ // ~8s cap
         collecting = false;
-        try{ src.disconnect(collector); collector.disconnect(); }catch(e){}
+        try{ wake.src.disconnect(wake.collector); wake.collector.disconnect(); }catch(e){}
+        wake.collector = null;
         finishUtterance();
       }
     };
-    src.connect(wake.node);
-    wake.node.connect(wake.ctx.destination); // worklet needs a destination to pump
+    wake.src.connect(wake.node);
+    wake.node.connect(wake.sink);
     wake.on = true; setListening('armed');
-  }catch(e){ toast('Hands-free unavailable: '+e.message); $('#cb-handsfree').checked = false; }
+  }catch(e){ toast('Hands-free unavailable: '+e.message); $('#cb-handsfree').checked = false; stopWake(); }
 }
 function stopWake(){
-  wake.on = false;
-  try{ wake.stream && wake.stream.getTracks().forEach(t=>t.stop()); wake.ctx && wake.ctx.close(); }catch(e){}
+  wake.on = false; wake.busy = false; wake.armed = false; wake.chunks = [];
+  clearTimeout(wake.armedTimer);
+  try{ if (wake.collector){ wake.src && wake.src.disconnect(wake.collector); wake.collector.disconnect(); } }catch(e){}
+  try{ wake.node && wake.node.disconnect(); wake.sink && wake.sink.disconnect(); }catch(e){}
+  try{ wake.stream && wake.stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+  try{ wake.ctx && wake.ctx.close(); }catch(e){}
+  wake.stream = wake.ctx = wake.node = wake.sink = wake.collector = wake.src = null;
   $('#listening-indicator').hidden = true;
 }
 function floatToWav(chunks, sampleRate){
@@ -912,8 +977,10 @@ function floatToWav(chunks, sampleRate){
   return new Blob([view], {type:'audio/wav'});
 }
 async function finishUtterance(){
+  if (wake.busy || wake.muted) { wake.chunks = []; return; }
   const chunks = wake.chunks; wake.chunks = [];
-  if (!chunks.length) return;
+  if (!chunks.length) { if (wake.on) setListening('armed'); return; }
+  wake.busy = true;
   const rate = wake.ctx ? wake.ctx.sampleRate : 48000;
   const blob = floatToWav(chunks, rate);
   const fd = new FormData(); fd.append('file', blob, 'speech.wav');
@@ -921,7 +988,9 @@ async function finishUtterance(){
     const r = await api('/api/voice/stt', {method:'POST', body: fd});
     const text = (r.text || '').trim();
     if (!text) { setListening('armed'); return; }
-    const m = text.match(WAKE_RE);
+    // Collapse pathological stutter transcripts from feedback/noise
+    const cleaned = text.replace(/\b(\w+)(?:[,.\s]+\1\b){2,}/gi, '$1');
+    const m = cleaned.match(WAKE_RE);
     if (m){
       const command = m[1].trim();
       if (command){
@@ -934,16 +1003,17 @@ async function finishUtterance(){
       }
     } else if (wake.armed){
       wake.armed = false; clearTimeout(wake.armedTimer);
-      await submitTranscript(text);
+      await submitTranscript(cleaned);
     }
+    // else: ignore non-wake speech while idle (prevents ambient loops)
   }catch(err){ toast('STT error: '+err.message); }
-  setListening('armed');
+  finally { wake.busy = false; if (wake.on) setListening(wake.armed ? 'command' : 'armed'); }
 }
 async function submitTranscript(text){
   try{
     const msg = await api('/api/chat', {method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:text})});
-    addMsg(msg);
+    upsertMsg(msg);
   }catch(err){ toast('Error: '+err.message); }
 }
 if ($('#cb-handsfree').checked) startWake();

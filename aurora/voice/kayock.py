@@ -83,9 +83,22 @@ class KayockTTS(TTSProvider):
                 now - self._voices_ts < self._voice_cache_seconds:
             return self._voices, self._voices_error
         try:
-            resp = await self._client.get("/models")
-            resp.raise_for_status()
-            data = resp.json()
+            # Prefer /voices (Kayock adapter on Portable); fall back to /models.
+            data = None
+            last_exc: Exception | None = None
+            for path in ("/voices", "/models"):
+                try:
+                    resp = await self._client.get(path)
+                    if resp.status_code == 404:
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if data is None:
+                raise last_exc or RuntimeError("no voice discovery endpoint")
             items = data.get("data", []) if isinstance(data, dict) else data
             if not isinstance(items, list):
                 items = []
@@ -94,7 +107,7 @@ class KayockTTS(TTSProvider):
                 if isinstance(item, str):
                     ids.append(item)
                 elif isinstance(item, dict):
-                    for key in ("id", "name", "voice_id", "voice"):
+                    for key in ("voice", "voice_id", "id", "name"):
                         if item.get(key):
                             ids.append(str(item[key]))
                             break

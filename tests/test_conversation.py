@@ -28,7 +28,7 @@ async def test_basic_turn_persists_and_broadcasts(make_app):
 
 async def test_tool_loop_set_reminder(make_app):
     rules = [
-        (r"\[tool set_reminder result\]", "Done!"),
+        (r"(?:\[tool set_reminder result\]|scheduled reminder)", "Done!"),
         (r"put bread on the shopping list",
          ChatResult(text="", finish_reason="tool_calls",
                     tool_calls=[ToolCall(name="set_reminder",
@@ -43,7 +43,7 @@ async def test_tool_loop_set_reminder(make_app):
     assert rems[0].text == "Check the bread"
     assert rems[0].source == "assistant_tool"
     # the model received the tool result and produced the final text
-    assert any("tool set_reminder result" in c["user"] for c in mock.calls)
+    assert any(("tool set_reminder result" in c["user"] or "scheduled reminder" in c["user"]) for c in mock.calls)
 
 
 async def test_nl_reminder_is_executed_model_free(make_app):
@@ -76,7 +76,7 @@ async def test_model_replying_with_tool_json_text_still_executes(make_app):
     """A model that leaks the tool call as plain JSON text in `content` must
     have that call EXECUTED — the JSON must never surface in the chat."""
     rules = [
-        (r"\[tool set_reminder result\]", "Done, I set the reminder!"),
+        (r"(?:\[tool set_reminder result\]|scheduled reminder)", "Done, I set the reminder!"),
         (r"water the plants",
          '{"name": "set_reminder", "arguments": {"text": "Water the plants", "when": "in 10 minutes"}}'),
     ]
@@ -85,7 +85,7 @@ async def test_model_replying_with_tool_json_text_still_executes(make_app):
     rems = app.reminders.list(active_only=True)
     assert len(rems) == 1 and rems[0].source == "assistant_tool"
     assert '"name"' not in msg["content"] and "set_reminder" not in msg["content"]
-    assert any("tool set_reminder result" in c["user"] for c in mock.calls)
+    assert any(("tool set_reminder result" in c["user"] or "scheduled reminder" in c["user"]) for c in mock.calls)
 
 
 async def test_provider_without_tools_skips_loop(make_app):

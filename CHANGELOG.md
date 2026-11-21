@@ -3,6 +3,26 @@
 All notable changes to Aurora Companion. The project follows semver-ish versioning
 (see docs/GITHUB_RELEASE.md §6). Dates are UTC.
 
+## [1.0.1] — 2026-11-21
+
+### Fixed
+- Dashboard chat: streaming deltas no longer rewrite whole message nodes, which
+  previously concatenated the `"chat"` source label into reply text and could
+  show duplicate assistant bubbles (POST + SSE). Content lives in `.msg-body`;
+  final messages are upserted by id.
+- Hands-free ("Hey Aurora"): mic graph no longer routes to speakers (feedback
+  loop with Speak replies); listening pauses during TTS playback; overlapping
+  STT submissions are gated; ambient non-wake speech is ignored while idle.
+  Wake detection remains energy-VAD + regex — not a dedicated wake-word model.
+- Kayock voice discovery prefers `GET /v1/voices` (Portable adapter) with
+  `/v1/models` fallback.
+- Ollama multi-round tool calls use OpenAI-shaped `tool_calls` / `role=tool`
+  messages; tool failures rebuild a clean prompt before retrying without tools.
+
+### Notes
+- GitHub tag `v1.0.0` shipped application code that still reported `__version__`
+  `0.2.0`. This release aligns the in-app version with the 1.0.x line.
+
 ## [Unreleased]
 
 ### Fixed (privileged rollback extraction, 2026-11-21)

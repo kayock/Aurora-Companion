@@ -92,10 +92,17 @@ def test_repeat_every_monday():
 
 def test_next_occurrence_daily():
     r = {"kind": "daily", "hour": 8, "minute": 0}
-    nxt = next_occurrence(r, NOW)  # 10:00 -> next day 08:00
+    nxt = next_occurrence(r, NOW)
     import datetime as dt
-    d = dt.datetime.fromtimestamp(nxt, dt.timezone.utc)
-    assert d.day == 22 and d.hour == 8
+    d = dt.datetime.fromtimestamp(nxt)  # local clock, matching next_occurrence
+    assert nxt > NOW
+    assert (d.hour, d.minute) == (8, 0)
+    # If local time is already past 08:00, this is tomorrow; otherwise today.
+    now_local = dt.datetime.fromtimestamp(NOW)
+    if (now_local.hour, now_local.minute) >= (8, 0):
+        assert d.date() > now_local.date()
+    else:
+        assert d.date() == now_local.date()
 
 
 def test_next_occurrence_weekdays_only_skips_weekend():

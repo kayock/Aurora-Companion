@@ -274,7 +274,7 @@ async def test_timer_set_via_tool_call(tmp_path):
     from aurora.providers.base import ChatResult, ToolCall
 
     rules = [
-        (r"\[tool set_reminder result\]", "Done!"),
+        (r"(?:\[tool set_reminder result\]|scheduled reminder)", "Done!"),
         (r"kitchen timer",
          ChatResult(text="", finish_reason="tool_calls", tool_calls=[ToolCall(
              name="set_reminder",

@@ -25,6 +25,11 @@ state, permissions, per-person memory, dashboard over the same APIs.
   noisy rooms, and it needs a secure context (HTTPS/localhost) like all mic access.
 
 ### New in this round (reminders/timers/updater) — honest limits
+- **Hands-free "Hey Aurora"** — browser energy-VAD + regex over STT text, not a
+  dedicated wake-word model. It can false-trigger and will miss soft/noisy
+  phrases. Mic audio must not be routed to speakers (feedback with Speak replies
+  previously caused stutter transcripts). Push-to-talk remains the reliable path.
+
 
 - **Chime** is generated in the browser (WebAudio); the browser tab must be open for
   reminders to chime or the bell to update live. Server-side TTS announcements

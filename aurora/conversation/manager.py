@@ -426,9 +426,11 @@ class ConversationManager:
                 try:
                     result = await self.chat_provider.chat(messages, tools=specs, on_delta=on_delta)
                 except ProviderError:
-                    if specs and round_no > 0:
-                        # server choked on tools: retry once without them
+                    if specs:
+                        # server choked on tools: rebuild clean prompt and retry once without them
+                        messages = await self._build_messages(text, person, proactive_context)
                         result = await self.chat_provider.chat(messages, tools=None, on_delta=on_delta)
+                        specs = None
                     else:
                         raise
                 if not result.tool_calls:
@@ -450,16 +452,25 @@ class ConversationManager:
                         text = "continue with the tool results"
                         continue
                     return prefix + self._clean(result.text)
-                messages.append({"role": "assistant", "content": result.text,
-                                 "tool_calls": [{"name": c.name, "arguments": c.arguments} for c in result.tool_calls]})
-                for call in result.tool_calls:
+                oai_calls = []
+                for i, c in enumerate(result.tool_calls):
+                    args = c.arguments if isinstance(c.arguments, str) else json.dumps(c.arguments)
+                    oai_calls.append({
+                        "id": f"call_{round_no}_{i}",
+                        "type": "function",
+                        "function": {"name": c.name, "arguments": args},
+                    })
+                messages.append({"role": "assistant", "content": result.text or "",
+                                 "tool_calls": oai_calls})
+                for i, call in enumerate(result.tool_calls):
                     args = parse_tool_arguments(call.arguments)
                     ctx = {"person": person, "tz_offset_minutes": 0}
                     output = await self.tools.call(call.name, args, ctx)
                     await self._emit({"type": "tool", "name": call.name, "arguments": args,
                                       "output": output})
-                    messages.append({"role": "user",
-                                     "content": f"[tool {call.name} result]\n{output}"})
+                    messages.append({"role": "tool",
+                                     "tool_call_id": f"call_{round_no}_{i}",
+                                     "content": str(output)})
                 text = "continue with the tool results"
             return prefix + self._clean(result.text)
         finally:
