@@ -23,11 +23,30 @@ from ..storage import Database
 from ..timeparse import next_occurrence, too_frequent
 from ..util import new_id
 
-# greetings / test noise that must never become a stored reminder (the user
-# observed "hi"-named rows created in a live run — blocked at the source now)
+# Greetings / test noise / conversational fluff that must never become a
+# stored reminder. Live Portable data included "hi", "null", "Good morning",
+# "Hey, Eric", truncated check-ins, and model self-intros — blocked here.
 _TRIVIAL_TEXT_RE = re.compile(
-    r"^(h+i+|hello+|hey+|yo+|ok(?:ay)?|yes+|no+|thanks?|thank you|test(?: reminder|ing)?"
-    r"|asdf+|qwerty+|null|undefined|none|nan|\.+)[\s!.?,:;~-]*$",
+    r"^(?:"
+    r"h+i+|hello+|hey(?:\s*,?\s*[\w'-]+)?|yo+|sup|"
+    r"good\s*(?:morning|afternoon|evening|night|day)|"
+    r"ok(?:ay)?|yes+|no+|thanks?|thank you|please|"
+    r"test(?: reminder|ing)?|asdf+|qwerty+|null|undefined|none|nan|"
+    r"take a break|stretch break|break time|"
+    r"\.+"
+    r")[\s!.?,:;~-]*$",
+    re.I)
+# Assistant chatter / truncated prose / capability blurbs mistaken for tasks.
+_NON_ACTIONABLE_RE = re.compile(
+    r"(?:"
+    r"^i can help you with\b|"
+    r"^morning check[- ]?in\b|"
+    r"\beric!?\s+it$|"          # truncated "… Eric! It"
+    r"^you'?re still working\b|"
+    r"^time to go to bed\b|"
+    r"^get out of bed\b|"
+    r"^exploration and theory\b"
+    r")",
     re.I)
 
 STATUS_SCHEDULED = "scheduled"
@@ -39,6 +58,26 @@ STATUS_CANCELLED = "cancelled"
 STATUS_MISSED = "missed"
 
 ACTIVE_STATUSES = (STATUS_SCHEDULED, STATUS_WAITING_ACK, STATUS_SNOOZED)
+HISTORY_STATUSES = (STATUS_DELIVERED, STATUS_DONE, STATUS_CANCELLED, STATUS_MISSED)
+
+
+def validate_reminder_text(text: str) -> str:
+    """Single choke-point for actionable reminder wording. Raises ValueError
+    when the text is greeting fluff, a non-task, or empty."""
+    cleaned = str(text or "").strip().strip('"').strip("'").strip()
+    if len(cleaned) < 2:
+        raise ValueError(
+            "reminder text is required — say what should be remembered, "
+            "e.g. 'check the servers'")
+    if _TRIVIAL_TEXT_RE.match(cleaned) or _NON_ACTIONABLE_RE.search(cleaned):
+        raise ValueError(
+            f"\"{cleaned}\" is not an actionable reminder text — say what "
+            "should be remembered, e.g. 'check the servers'")
+    # Truncated mid-sentence ends (model dumped its own reply into `text`).
+    if cleaned.endswith((" It", " it", " I", " I'm", " We", " The")):
+        raise ValueError(
+            f"\"{cleaned}\" looks like truncated chat, not a reminder task")
+    return cleaned
 
 
 @dataclass
@@ -119,15 +158,8 @@ class ReminderStore:
         # single validation choke point: every creation path (dashboard form,
         # API, chat fast-path, model tool) flows through here, so junk never
         # reaches the store — no "hi"/"null"/blank reminder rows, ever.
-        text = str(text or "").strip()
+        text = validate_reminder_text(text)
         project = str(project or "").strip()
-        if len(text) < 2 or _TRIVIAL_TEXT_RE.match(text):
-            raise ValueError(
-                f"\"{text}\" is not an actionable reminder text — say what "
-                "should be remembered, e.g. 'check the servers'")
-        text = (text or "").strip()
-        if not text:
-            raise ValueError("reminder text is required")
         if repeat is not None and too_frequent(repeat, self.min_repeat_seconds):
             raise ValueError(f"repeat interval below minimum ({self.min_repeat_seconds}s)")
         now = self.clock.now()
@@ -157,12 +189,18 @@ class ReminderStore:
         return _row_to_reminder(row) if row else None
 
     def list(self, active_only: bool = False, person: str | None = None,
-             project: str | None = None) -> list[Reminder]:
+             project: str | None = None, view: str | None = None) -> list[Reminder]:
+        """List reminders. `view` is 'active' | 'history' | 'all' (default).
+        `active_only=True` is kept for callers and means view='active'."""
         sql, params = "SELECT * FROM reminders", []
         clauses = []
-        if active_only:
+        effective = view or ("active" if active_only else "all")
+        if effective == "active":
             clauses.append(f"status IN ({','.join('?' * len(ACTIVE_STATUSES))})")
             params.extend(ACTIVE_STATUSES)
+        elif effective == "history":
+            clauses.append(f"status IN ({','.join('?' * len(HISTORY_STATUSES))})")
+            params.extend(HISTORY_STATUSES)
         if person:
             clauses.append("person=?")
             params.append(person)
@@ -295,7 +333,29 @@ class ReminderStore:
         self._update(rem.id, status=STATUS_SCHEDULED, due_at=nxt, attempts=0)
         return self.get(rem.id)
 
+    def delete(self, rem_id: str) -> bool:
+        """Permanently remove one reminder row (any status)."""
+        cur = self.db.execute("DELETE FROM reminders WHERE id=?", (rem_id,))
+        return bool(cur.rowcount and cur.rowcount > 0)
+
+    def delete_many(self, rem_ids: list[str]) -> int:
+        """Permanently remove the given ids. Returns how many rows were deleted."""
+        ids = [str(i) for i in rem_ids if i]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        cur = self.db.execute(f"DELETE FROM reminders WHERE id IN ({placeholders})", tuple(ids))
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    def clear_history(self) -> int:
+        """Permanently delete delivered/done/cancelled/missed rows only —
+        never touches active (scheduled / waiting_ack / snoozed)."""
+        cur = self.db.execute(
+            f"DELETE FROM reminders WHERE status IN ({','.join('?' * len(HISTORY_STATUSES))})",
+            HISTORY_STATUSES,
+        )
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
     def clear_done(self) -> int:
-        cur = self.db.execute("DELETE FROM reminders WHERE status IN (?,?,?)",
-                              (STATUS_DONE, STATUS_CANCELLED, STATUS_MISSED))
-        return cur.rowcount if cur.rowcount > 0 else 0
+        """Backward-compatible alias: clear finished history statuses."""
+        return self.clear_history()

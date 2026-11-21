@@ -70,30 +70,53 @@ class PromptBuilder:
         # 4. Time (live).
         blocks.append(time_context(now_epoch))
 
-        # 5. Upcoming reminders (live) — so the model knows what's pending.
+        # 5. Companion behavior (stable) — application-level guardrails so the
+        # model does not invent reminders, countdown-nag, or over-correct ASR.
+        blocks.append(
+            "Conversation guardrails:\n"
+            "- Only call set_reminder when the user clearly asks to be reminded "
+            "or to set a timer. Never schedule greetings, check-ins, breaks, or "
+            "your own suggestions as reminders.\n"
+            "- Do not announce, count down, or repeatedly mention upcoming "
+            "reminders during ordinary chat. Mention them only if the user asks "
+            "about reminders, or when this turn is an actual reminder delivery.\n"
+            "- Work-break and check-in ideas are spoken once as conversation — "
+            "not turned into scheduled tasks unless the user asks.\n"
+            "- Speech recognition can mishear names and greetings (e.g. "
+            "'Hey, Rorro' for 'Hey, Aurora'). Respond naturally; do not treat "
+            "mishearings as mistakes the user must correct.\n"
+            "- Keep proactive tone varied and brief; avoid repeating the same "
+            "nudge in consecutive turns."
+        )
+
+        # 6. Upcoming reminders (live) — internal reference for tools only.
+        # Deliberately omit relative countdowns ("in 20 minutes") so the model
+        # is not nudged into premature announcement during unrelated chat.
         if self.reminders is not None:
             upcoming = [r for r in self.reminders.list(active_only=True, person=subject)][:5]
             if upcoming:
-                from ..timeparse import friendly
                 from ..timeparse import describe_repeat
                 lines = []
                 for r in upcoming:
                     rep = f" ({describe_repeat(r.repeat)})" if r.repeat else ""
-                    lines.append(f"- \"{r.text}\" {friendly(r.due_at, now_epoch)}{rep} [{r.id}]")
-                blocks.append("Reminders currently scheduled:\n" + "\n".join(lines) +
-                              "\nIf the user wants one changed, use the reminder tools.")
+                    lines.append(f"- [{r.id}] \"{r.text}\"{rep}")
+                blocks.append(
+                    "Active reminders (internal reference — do not recite or "
+                    "count down unless the user asks about their reminders):\n"
+                    + "\n".join(lines)
+                )
 
-        # 6. People context.
+        # 7. People context.
         if self.people is not None:
             block = self.people.context_block(subject)
             if block:
                 blocks.append(block)
 
-        # 7. Proactive frame (when this turn is companion-initiated).
+        # 8. Proactive frame (when this turn is companion-initiated).
         if proactive_context:
             blocks.append(proactive_context)
 
-        # 8. Caller-supplied extras (e.g. screen descriptions).
+        # 9. Caller-supplied extras (e.g. screen descriptions).
         for extra in extra_blocks or []:
             blocks.append(extra)
 

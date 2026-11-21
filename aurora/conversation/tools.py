@@ -82,6 +82,8 @@ def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
             person = ctx.get("person", "owner")
             if not text:
                 return "error: reminder text required"
+            if not when_words:
+                return "error: when is required — use the user's timing words"
             due = parse_when(when_words, clock.now(), tz_offset_minutes=ctx.get("tz_offset_minutes", 0))
             if due is None:
                 return (f"error: could not understand the time \"{when_words}\". "
@@ -91,20 +93,26 @@ def default_tool_registry(services: dict[str, Any]) -> ToolRegistry:
             repeat = parse_repeat(when_words)
             follow_up = bool(args.get("follow_up", False))
             kind = "timer" if "timer" in (text + " " + when_words).lower() else ""
-            rem = reminders.add(
-                text, due, repeat=repeat, follow_up=follow_up,
-                project=str(args.get("project", "")), person=person, source="assistant_tool",
-                kind=kind,
-                duration=int(round(due - clock.now())) if kind == "timer" else None,
-            )
+            try:
+                rem = reminders.add(
+                    text, due, repeat=repeat, follow_up=follow_up,
+                    project=str(args.get("project", "")), person=person, source="assistant_tool",
+                    kind=kind,
+                    duration=int(round(due - clock.now())) if kind == "timer" else None,
+                )
+            except ValueError as exc:
+                return f"error: {exc}"
             ctx.get("on_change", (lambda: None))()
             rep = f", repeating {describe_repeat(repeat)}" if repeat else ""
-            return f"scheduled reminder {rem.id}: \"{text}\" for {friendly(due, clock.now())}{rep}"
+            return f"scheduled reminder {rem.id}: \"{rem.text}\" for {friendly(due, clock.now())}{rep}"
 
         registry.register(_spec(
             "set_reminder",
-            "Schedule a reminder for the user. Pass their own timing words as `when` "
-            "(e.g. 'in 20 minutes', 'tomorrow at 9am', 'every day at 8am', 'next monday at 6pm').",
+            "Schedule a reminder ONLY when the user explicitly asks to be reminded "
+            "or to set a timer. Never use this for greetings, check-ins, break "
+            "suggestions, or your own ideas. `text` must be an actionable task "
+            "(e.g. 'check the servers'), and `when` must be the user's timing "
+            "words (e.g. 'in 20 minutes', 'tomorrow at 9am', 'every day at 8am').",
             {"type": "object",
              "properties": {
                  "text": {"type": "string"},

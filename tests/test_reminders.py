@@ -87,7 +87,7 @@ async def test_ack_stops_follow_up(sched):
 
 async def test_recurring_ack_schedules_next_occurrence(sched):
     app, store, rs, delivered = sched
-    rem = store.add("Stretch break", app.clock.now() + 60,
+    rem = store.add("Do desk stretches", app.clock.now() + 60,
                     repeat={"kind": "interval", "seconds": 900}, follow_up=True,
                     follow_up_seconds=120, follow_up_max=1)
     app.clock.advance(61)

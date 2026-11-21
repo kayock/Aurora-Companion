@@ -20,5 +20,5 @@ the Free Software Foundation, either version 3 of the License, or (at
 your option) any later version.  See LICENSE and NOTICE.md.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 APP_NAME = "Aurora"

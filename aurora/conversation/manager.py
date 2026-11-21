@@ -835,8 +835,16 @@ class ConversationManager:
         frame = (
             "You are initiating a conversation yourself (no user message this turn). "
             f"Kind of initiation: {kind}. One short, natural opening message — "
-            "at most one question. Do not repeat anything you have already said recently."
+            "at most one question. Do not repeat anything you have already said recently. "
+            "Do not schedule reminders or timers on this turn; speak only."
         )
+        if kind == "work_break":
+            frame += (
+                " This is a gentle spoken check-in about taking a break — not a "
+                "scheduled reminder. Vary the wording; do not nag."
+            )
+        if kind == "morning_greeting":
+            frame += " Keep it a brief greeting; do not invent tasks or reminders."
         if topic is not None:
             frame += f"\nTopic to bring up: {topic.summary}"
         context = f"Proactive initiation\n{frame}"

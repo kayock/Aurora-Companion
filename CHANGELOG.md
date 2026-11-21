@@ -3,6 +3,27 @@
 All notable changes to Aurora Companion. The project follows semver-ish versioning
 (see docs/GITHUB_RELEASE.md §6). Dates are UTC.
 
+## [1.0.2] — 2026-11-21
+
+### Fixed
+- Reminders dashboard listed every status, so **Done** / **Cancel** looked broken
+  even though the database updated. Active / History / All views now filter
+  correctly; completed and cancelled rows leave Active immediately.
+- Permanent **Delete**, multi-select **Delete selected**, and **Clear history**
+  (delivered / done / cancelled / missed only) are wired through the API and UI.
+- Phantom reminders from greetings, break nudges, truncated check-ins, and model
+  self-intros are rejected at the store (every create path) and the set_reminder
+  tool returns an error instead of storing them.
+- System prompts no longer inject relative countdown phrasing for upcoming
+  reminders, and guardrails tell the model not to schedule or recite reminders
+  unless the user asks (or a delivery turn is in progress).
+- Proactive work-break / morning frames instruct the model to speak only — never
+  invent scheduled tasks on initiation turns.
+
+### Notes
+- Next GitHub release candidate after local verification on Portable. Do not
+  push until the owner requests publication.
+
 ## [1.0.1] — 2026-11-21
 
 ### Fixed

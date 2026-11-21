@@ -209,9 +209,14 @@ def create_server(app: CompanionApp) -> FastAPI:
 
     # ------------------------------------------------------------ reminders
     @api.get("/api/reminders")
-    async def list_reminders(active_only: bool = False):
-        items = app.reminders.list(active_only=active_only)
-        return {"reminders": [r.to_dict() for r in items]}
+    async def list_reminders(active_only: bool = False, view: str | None = None):
+        """List reminders. Prefer `view=active|history|all`. `active_only`
+        remains for older clients and maps to view=active."""
+        effective = view or ("active" if active_only else "all")
+        if effective not in ("active", "history", "all"):
+            raise HTTPException(400, "view must be active, history, or all")
+        items = app.reminders.list(view=effective)
+        return {"reminders": [r.to_dict() for r in items], "view": effective}
 
     @api.post("/api/reminders")
     async def add_reminder(request: Request):
@@ -250,18 +255,52 @@ def create_server(app: CompanionApp) -> FastAPI:
             body = await request.json()
         except Exception:
             pass
-        if action == "ack" or action == "done":
+        if action == "ack" or action == "done" or action == "complete":
             rem = app.reminders.acknowledge(rem_id)
         elif action == "cancel" or action == "dismiss":
             rem = app.reminders.dismiss(rem_id)
         elif action == "snooze":
-            rem = app.reminders.snooze(rem_id, int(body.get("seconds", 600)))
+            # Prefer bring_back so delivered one-shots (post-fire) can still
+            # be deferred from the dashboard; falls back to snooze for active.
+            rem = app.reminders.bring_back(rem_id, int(body.get("seconds", 600))) \
+                or app.reminders.snooze(rem_id, int(body.get("seconds", 600)))
+        elif action == "delete":
+            if not app.reminders.delete(rem_id):
+                raise HTTPException(404, "reminder not found")
+            app.reminder_scheduler.notify_changed()
+            return {"ok": True, "deleted": [rem_id]}
         else:
             raise HTTPException(400, f"unknown action {action}")
         if rem is None:
             raise HTTPException(404, "reminder not found")
         app.reminder_scheduler.notify_changed()
         return rem.to_dict()
+
+    @api.delete("/api/reminders/{rem_id}")
+    async def delete_reminder(rem_id: str):
+        if not app.reminders.delete(rem_id):
+            raise HTTPException(404, "reminder not found")
+        app.reminder_scheduler.notify_changed()
+        return {"ok": True, "deleted": [rem_id]}
+
+    @api.post("/api/reminders/bulk-delete")
+    async def bulk_delete_reminders(request: Request):
+        body = await request.json()
+        ids = body.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            raise HTTPException(400, "ids must be a non-empty list")
+        if len(ids) > 500:
+            raise HTTPException(400, "too many ids (max 500)")
+        deleted = app.reminders.delete_many([str(i) for i in ids])
+        app.reminder_scheduler.notify_changed()
+        return {"ok": True, "deleted_count": deleted}
+
+    @api.post("/api/reminders/clear-history")
+    async def clear_reminder_history():
+        """Permanently delete delivered/done/cancelled/missed rows only."""
+        n = app.reminders.clear_history()
+        app.reminder_scheduler.notify_changed()
+        return {"ok": True, "deleted_count": n}
 
     @api.get("/api/reminders/deliveries")
     async def reminder_deliveries():

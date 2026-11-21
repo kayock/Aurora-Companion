@@ -178,6 +178,18 @@ button.bell{position:relative;padding:.25rem .5rem}
         <label class="switch small"><input type="checkbox" id="rem-follow"> nag until done</label>
         <button class="primary" type="submit">Add</button>
       </form>
+      <div class="row" style="margin-bottom:.6rem;gap:.5rem;flex-wrap:wrap;align-items:center">
+        <select id="rem-view" onchange="loadReminders()">
+          <option value="active">Active</option>
+          <option value="history">History</option>
+          <option value="all">All</option>
+        </select>
+        <button class="ghost" type="button" onclick="remSelectAll(true)">Select all</button>
+        <button class="ghost" type="button" onclick="remSelectAll(false)">Clear selection</button>
+        <button class="ghost" type="button" onclick="remBulkDelete()">Delete selected…</button>
+        <button class="ghost" type="button" onclick="remClearHistory()">Clear history…</button>
+        <span class="small" id="rem-count"></span>
+      </div>
       <div id="rem-list" class="tblwrap"></div>
       <h3>Delivery log</h3>
       <div id="rem-deliveries" class="small"></div>
@@ -531,22 +543,38 @@ async function addFact(){
 }
 
 /* ---- reminders ---- */
+const ACTIVE_REM = new Set(['scheduled','waiting_ack','snoozed']);
 async function loadReminders(){
-  const data = await api('/api/reminders');
+  const view = ($('#rem-view') && $('#rem-view').value) || 'active';
+  const data = await api('/api/reminders?view=' + encodeURIComponent(view));
   // guard against junk rows: never render a reminder without text (server
   // validation blocks them at creation; this is the belt-and-braces view)
-  const rows = data.reminders.filter(r=>r && (r.text||'').trim()).map(r=>{
+  const items = data.reminders.filter(r=>r && (r.text||'').trim());
+  if ($('#rem-count')) $('#rem-count').textContent = items.length
+    ? `${items.length} in ${view}` : `none in ${view}`;
+  const rows = items.map(r=>{
     const due = new Date(r.due_at*1000).toLocaleString();
     const badge = r.status==='waiting_ack'?` <span class="badge">awaiting ack (attempt ${r.attempts})</span>`:
       r.status==='snoozed'?' <span class="badge">snoozed</span>':
+      r.status==='delivered'?' <span class="badge">delivered</span>':
+      r.status==='done'?' <span class="badge">done</span>':
+      r.status==='cancelled'?' <span class="badge">cancelled</span>':
+      r.status==='missed'?' <span class="badge">missed</span>':
       r.repeat?' <span class="badge">recurring</span>':'';
-    const btn = (label,action,seconds)=>`<button class="ghost" onclick="remAction('${r.id}','${action}'${seconds?','+seconds:''})">${label}</button>`;
-    return `<tr><td>${r.text||''}</td><td>${due}${badge}</td><td>${r.project||''}</td>
-      <td>${btn('Done','done')} ${btn('Snooze 10m','snooze',600)} ${btn('Cancel','cancel')}</td></tr>`;
+    const btn = (label,action,seconds)=>`<button class="ghost" onclick="remAction('${r.id}','${action}'${seconds!=null?','+seconds:''})">${label}</button>`;
+    const isActive = ACTIVE_REM.has(r.status);
+    const actions = isActive
+      ? `${btn('Done','done')} ${btn('Snooze 10m','snooze',600)} ${btn('Cancel','cancel')} ${btn('Delete','delete')}`
+      : `${btn('Delete','delete')}`;
+    const esc = (r.text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    return `<tr data-rem-id="${r.id}">
+      <td><input type="checkbox" class="rem-cb" value="${r.id}"></td>
+      <td>${esc}</td><td>${due}${badge}</td><td>${r.project||''}</td>
+      <td>${actions}</td></tr>`;
   }).join('');
   $('#rem-list').innerHTML = rows
-    ? `<table><tr><th>Reminder</th><th>Due</th><th>Project</th><th></th></tr>${rows}</table>`
-    : '<p class="small">None scheduled.</p>';
+    ? `<table><tr><th></th><th>Reminder</th><th>Due</th><th>Project</th><th></th></tr>${rows}</table>`
+    : `<p class="small">${view==='active'?'No active reminders.':'No reminders in this view.'}</p>`;
   const del = await api('/api/reminders/deliveries');
   $('#rem-deliveries').innerHTML = del.deliveries.slice(-8).reverse().map(d=>
     `${fmtTime(d.ts)} — "${d.text}" (attempt ${d.attempts})`).join('<br>') || 'no deliveries yet';
@@ -557,13 +585,47 @@ $('#remform').onsubmit = async e => {
     body:JSON.stringify({text:$('#rem-text').value,when:$('#rem-when').value,
       follow_up:$('#rem-follow').checked})});
     $('#rem-text').value=''; $('#rem-when').value=''; $('#rem-follow').checked=false;
+    if ($('#rem-view')) $('#rem-view').value='active';
     toast('Reminder scheduled'); loadReminders();
   }catch(err){ toast('Error: '+err.message); }
 };
 async function remAction(id, action, seconds){
-  await api(`/api/reminders/${id}/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({seconds:seconds||600})});
-  loadReminders();
+  try{
+    if(action==='delete'){
+      if(!confirm('Permanently delete this reminder?')) return;
+      await api(`/api/reminders/${id}`,{method:'DELETE'});
+    }else{
+      await api(`/api/reminders/${id}/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({seconds:seconds||600})});
+    }
+    await loadReminders();
+  }catch(err){ toast('Error: '+err.message); }
+}
+function remSelectedIds(){
+  return [...document.querySelectorAll('#rem-list .rem-cb:checked')].map(cb=>cb.value);
+}
+function remSelectAll(on){
+  document.querySelectorAll('#rem-list .rem-cb').forEach(cb=>{ cb.checked = !!on; });
+}
+async function remBulkDelete(){
+  const ids = remSelectedIds();
+  if(!ids.length){ toast('Select one or more reminders first'); return; }
+  if(!confirm(`Permanently delete ${ids.length} selected reminder(s)? This cannot be undone.`)) return;
+  try{
+    const r = await api('/api/reminders/bulk-delete',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ids})});
+    toast(`Deleted ${r.deleted_count||ids.length}`);
+    await loadReminders();
+  }catch(err){ toast('Error: '+err.message); }
+}
+async function remClearHistory(){
+  if(!confirm('Permanently delete ALL history reminders (delivered / done / cancelled / missed)? Active reminders are kept.')) return;
+  try{
+    const r = await api('/api/reminders/clear-history',{method:'POST'});
+    toast(`Cleared ${r.deleted_count||0} from history`);
+    if ($('#rem-view')) $('#rem-view').value='history';
+    await loadReminders();
+  }catch(err){ toast('Error: '+err.message); }
 }
 
 /* ---- persona ---- */
